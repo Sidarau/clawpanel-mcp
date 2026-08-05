@@ -150,6 +150,36 @@ class ClawpanelDB:
                         f"tenant_id=eq.{tenant}&select=id,name,default_model,"
                         f"gateway_url,persona,updated_at&order=updated_at.desc")
 
+    def create_agent(self, tenant: str, name: str, system_prompt: str,
+                     default_model: str | None = None) -> dict:
+        row: dict[str, Any] = {"tenant_id": tenant, "name": name,
+                               "system_prompt": system_prompt}
+        if default_model:
+            row["default_model"] = default_model
+        rows = self.post("agents", row)
+        return rows[0] if isinstance(rows, list) and rows else rows
+
+    def update_agent(self, tenant: str, agent_id: str, fields: dict) -> dict:
+        allowed = {"name", "system_prompt", "default_model", "persona"}
+        body = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not body:
+            raise RuntimeError("update_agent: nothing editable in fields "
+                               f"(allowed: {sorted(allowed)})")
+        req = urllib.request.Request(
+            f"{self.base}/rest/v1/agents?id=eq.{agent_id}&tenant_id=eq.{tenant}",
+            data=json.dumps(body).encode(),
+            headers=self._headers() | {"Content-Type": "application/json",
+                                       "Prefer": "return=representation"},
+            method="PATCH")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                rows = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"patch agents -> {e.code} {e.read()[:300]}") from e
+        if not rows:
+            raise RuntimeError("agent not found in your workspace")
+        return rows[0]
+
     def recent_runs(self, tenant: str, limit: int = 10) -> list[dict]:
         return self.get("workflow_runs",
                         f"tenant_id=eq.{tenant}&select=id,agent_id,status,trigger,"

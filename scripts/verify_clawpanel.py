@@ -34,7 +34,7 @@ def check(label, ok, detail=""):
 
 
 def dance(client: httpx.Client, email: str, passphrase: str,
-          scope: str = "brain memory kb") -> tuple[str, list[str]]:
+          scope: str = "brain memory kb drive approvals edit create") -> tuple[str, list[str]]:
     meta = client.get(f"{BASE}/.well-known/oauth-authorization-server").json()
     reg = client.post(meta["registration_endpoint"], json={
         "client_name": "verify-clawpanel",
@@ -132,7 +132,11 @@ def main() -> int:
         atools = list_tools(client, ah)
         check("alex sees all tools",
               {"search", "fetch", "memory_search", "remember",
-               "agents", "workspace_status", "chat_history"} <= set(atools), str(atools))
+               "agents", "workspace_status", "chat_history",
+               "create_agent", "update_agent"} <= set(atools), str(atools))
+        dtools = list_tools(client, dh)
+        check("dominik has host scopes (create/edit)",
+              {"create_agent", "update_agent"} <= set(dtools), str(dtools))
 
         # tenant isolation: each sees their own agents/chat
         alex_agents = text_of(call(client, ah, "agents"))

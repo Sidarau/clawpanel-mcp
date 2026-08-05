@@ -32,7 +32,8 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.routing import Route
 
-ALL_SCOPES = ["brain", "memory", "kb", "drive"]
+ALL_SCOPES = ["brain", "memory", "kb", "drive", "approvals", "edit", "create"]
+HOST_SCOPES = ["approvals", "edit", "create"]  # workspace-host capabilities
 
 LOGIN_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <title>ClawPanel · sign in</title><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -124,6 +125,12 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
             client = await self.get_client(str(q["client_id"]))
             if client is None:
                 return self._page(q, error='<span class="err">Unregistered client.</span>')
+            # The parent filters granted scopes against the client's registered
+            # scopes. The SERVER is the authority on grants: widen the
+            # registration so the profile's scopes always survive the filter.
+            if scopes:
+                client.scope = " ".join(
+                    sorted(set((client.scope or "").split()) | set(scopes)))
             params = AuthorizationParams(
                 redirect_uri=str(q["redirect_uri"]),
                 redirect_uri_provided_explicitly=True,

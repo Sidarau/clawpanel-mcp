@@ -135,6 +135,30 @@ def build_server(*, base_url: str = "") -> FastMCP:
             + (f" · {r['gateway_url']}" if r.get("gateway_url") else "")
             for r in rows)
 
+    @mcp.tool(annotations=WRITE_MEMO, auth=[require_scopes("create")])
+    async def create_agent(name: str, system_prompt: str,
+                           default_model: str | None = None) -> str:
+        """Create a new agent in your workspace (host scope: create)."""
+        p = _principal()
+        row = await anyio.to_thread.run_sync(
+            lambda: _client().create_agent(p["tenant_id"], name, system_prompt,
+                                           default_model))
+        return f"created agent {row.get('name')} ({row.get('id')})"
+
+    @mcp.tool(annotations=WRITE_MEMO, auth=[require_scopes("edit")])
+    async def update_agent(agent_id: str, name: str | None = None,
+                           system_prompt: str | None = None,
+                           default_model: str | None = None,
+                           persona: str | None = None) -> str:
+        """Edit an existing agent — name, prompt, model, or persona
+        (host scope: edit). Only the fields you pass are changed."""
+        p = _principal()
+        fields = {"name": name, "system_prompt": system_prompt,
+                  "default_model": default_model, "persona": persona}
+        row = await anyio.to_thread.run_sync(
+            lambda: _client().update_agent(p["tenant_id"], agent_id, fields))
+        return f"updated agent {row.get('name')} ({row.get('id')})"
+
     @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("brain")])
     async def workspace_status() -> str:
         """What your workspace is doing: agents, recent workflow runs,
