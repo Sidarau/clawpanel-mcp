@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "clawpanel-mcp"
+version = "0.1.0a1"
+description = "ClawPanel client workspaces as an MCP server — tenant-scoped KB, memory, and agent status over streamable HTTP with OAuth 2.1. ChatGPT deep-research compatible."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "Alex Sidarau", email = "alex@zeuglab.com" }]
+dependencies = [
+    "fastmcp>=3.4.5",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+clawpanel-mcp = "clawpanel_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clawpanel_mcp"]
