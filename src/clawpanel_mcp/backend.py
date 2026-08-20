@@ -112,6 +112,31 @@ class ClawpanelDB:
 
     # -- identity -------------------------------------------------------------
 
+    # -- OAuth client persistence ------------------------------------------
+    # DCR registrations live in memory on the provider; every fly restart
+    # wiped them and stranded connected ChatGPT clients at "Unregistered
+    # client". Mirror registrations into this table so they survive.
+
+    def save_client(self, client: dict) -> None:
+        req = urllib.request.Request(
+            f"{self.base}/rest/v1/mcp_clients",
+            data=json.dumps({"client_id": client["client_id"], "client": client}).encode(),
+            headers=self._headers() | {"Content-Type": "application/json",
+                                       "Prefer": "resolution=merge-duplicates,return=minimal"},
+            method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30):
+                pass
+        except Exception:
+            pass  # best-effort: memory still serves this run
+
+    def load_client(self, client_id: str) -> dict | None:
+        try:
+            rows = self.get("mcp_clients", f"client_id=eq.{client_id}&select=client&limit=1")
+            return rows[0]["client"] if rows else None
+        except Exception:
+            return None
+
     def resolve_profile(self, email: str) -> dict | None:
         """email → {user_id, tenant_id}. The OAuth login gate calls this."""
         rows = self.get("profiles", f"email=eq.{urllib.parse.quote(email)}&limit=1")

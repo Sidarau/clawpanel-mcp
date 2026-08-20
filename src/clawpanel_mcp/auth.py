@@ -28,6 +28,7 @@ from typing import Any
 from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
 from mcp.server.auth.provider import AuthorizationParams
 from mcp.server.auth.settings import ClientRegistrationOptions
+from mcp.shared.auth import OAuthClientInformationFull
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.routing import Route
@@ -73,6 +74,21 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
         self._code_principal: dict[str, dict] = {}
 
     # -- principal plumbing -------------------------------------------------
+
+    async def register_client(self, client_info):  # type: ignore[override]
+        await super().register_client(client_info)
+        # Persist the DCR registration — fly restarts wipe memory, and a lost
+        # registration strands the client at "Unregistered client" forever.
+        self.db.save_client(client_info.model_dump(mode="json"))
+
+    async def get_client(self, client_id: str):  # type: ignore[override]
+        client = await super().get_client(client_id)
+        if client is None:
+            row = self.db.load_client(client_id)
+            if row:
+                client = OAuthClientInformationFull.model_validate(row)
+                self.clients[client_id] = client
+        return client
 
     async def exchange_authorization_code(self, client, authorization_code):  # type: ignore[override]
         token = await super().exchange_authorization_code(client, authorization_code)
