@@ -69,3 +69,26 @@ make your KB citable).
 `scripts/verify_clawpanel.py` runs the full OAuth dance for two tenants and
 asserts **tenant isolation** (each sees only their own agents/chat, cross-tenant
 fetch returns nothing), scope gating, and every tool against live data.
+
+## KB ingestion (`ingest`)
+
+`ingest(title, text, source_url=None)` chunks the text with a word-window
+splitter (≤460 estimated tokens/chunk, well under the 512-token embed cap) and
+writes `zme_chunks` rows for the caller's tenant. Notes on the live schema:
+
+- This project has **no `sources` table** and no `source_url` column on chunks.
+  The `zme_chunks_one_parent` constraint requires every chunk to link to exactly
+  one parent (`drive_node_id` XOR `kb_page_id`), so each ingested doc also
+  creates a **`kb_pages` row** (unique per-tenant `slug`, full text as
+  `body_md`) and chunks link to it via `kb_page_id`.
+- `content_tsv` is a **generated stored column** (context_prefix + heading +
+  content), so the lexical arm of `zme_search` picks up new chunks
+  automatically — no trigger to maintain.
+- Chunks are embedded with `nvidia/nv-embedqa-e5-v5` using
+  **`input_type=passage`** (the stored side; queries use `input_type=query` —
+  the model is asymmetric). Embeddings are 1024-dim `vector(1024)` and the
+  vector arm is HNSW-indexed; both arms verified live end-to-end.
+- **Idempotent per source**: the marker (`sha256(source_url)` or
+  `sha256(title+text)`) lives in `context_prefix` and drives the slug;
+  re-ingesting the same source updates the page and replaces its chunks in
+  place instead of duplicating.
