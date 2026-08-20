@@ -201,14 +201,23 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
         secret = str(form.get("passphrase", ""))
         cfg = self.profiles_cfg.get(email)
 
-        if not cfg or cfg["secret"] != secret:
-            return self._page(q, error='<span class="err">Unknown email or bad passphrase.</span>')
+        # The website password is the connector password: verify against
+        # Supabase auth first so password rotations propagate automatically.
+        # The env passphrase remains as a legacy fallback (and the only path
+        # when Supabase auth is unreachable). Accounts dropped from
+        # CLAWPANEL_OAUTH_PROFILES accept ONLY their website password.
+        ok = self.db.verify_password(email, secret)
+        if ok is not True and (not cfg or cfg["secret"] != secret):
+            return self._page(q, error='<span class="err">Unknown email or bad password.</span>')
 
         profile = self.db.resolve_profile(email)
         if not profile:
             return self._page(q, error='<span class="err">No ClawPanel workspace '
                                        'for this email.</span>')
-        scopes = [s for s in cfg.get("scopes", ["kb"]) if s in ALL_SCOPES]
+        # Env-less accounts (password-only) get the workspace-user scopes.
+        default_scopes = ["brain", "memory", "kb"]
+        scopes = [s for s in (cfg.get("scopes", default_scopes) if cfg else default_scopes)
+                  if s in ALL_SCOPES]
         try:
             client = await self.get_client(str(q["client_id"]))
             if client is None:

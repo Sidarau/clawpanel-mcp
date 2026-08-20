@@ -190,6 +190,24 @@ class ClawpanelDB:
         rows = self.get("profiles", f"email=eq.{urllib.parse.quote(email)}&limit=1")
         return rows[0] if rows else None
 
+    def verify_password(self, email: str, password: str) -> bool | None:
+        """Check email+password against Supabase auth (the website credential).
+
+        True = correct, False = definitively wrong, None = auth unreachable
+        (caller may fall back to the legacy env passphrase)."""
+        req = urllib.request.Request(
+            f"{self.base}/auth/v1/token?grant_type=password",
+            data=json.dumps({"email": email, "password": password}).encode(),
+            headers=self._headers() | {"Content-Type": "application/json"},
+            method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status == 200
+        except urllib.error.HTTPError:
+            return False  # 400/401: wrong password — definitive
+        except Exception:
+            return None  # network/5xx: inconclusive
+
     # -- KB (zme_*) -------------------------------------------------------------
 
     def embed_query(self, text: str) -> list[float] | None:
