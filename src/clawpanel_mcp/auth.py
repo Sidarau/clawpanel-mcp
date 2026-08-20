@@ -22,11 +22,12 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import time
 import urllib.parse
 from typing import Any
 
 from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
-from mcp.server.auth.provider import AuthorizationParams
+from mcp.server.auth.provider import AccessToken, AuthorizationParams, RefreshToken
 from mcp.server.auth.settings import ClientRegistrationOptions
 from mcp.shared.auth import OAuthClientInformationFull
 from starlette.requests import Request
@@ -90,20 +91,91 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
                 self.clients[client_id] = client
         return client
 
+    # -- token persistence ---------------------------------------------------
+    # Access tokens expire after 1h and refresh tokens are rotated, but both
+    # lived only in memory — and fly auto-stops this machine when idle, so
+    # every idle period ended every ChatGPT session ("connection has
+    # expired"). Persist each issued pair; rehydrate from the DB on a memory
+    # miss; delete on revoke and rotation.
+
+    def _persist_token(self, token, principal: dict) -> None:
+        access = self.access_tokens.get(token.access_token)
+        refresh = self.refresh_tokens.get(token.refresh_token)
+        self.db.save_oauth_token(
+            access_token=token.access_token,
+            refresh_token=token.refresh_token,
+            client_id=access.client_id if access else "",
+            scopes=list(access.scopes) if access else [],
+            expires_at=access.expires_at if access else None,
+            principal=principal)
+
+    def _rehydrate_token(self, row: dict) -> None:
+        access, refresh = row["access_token"], row["refresh_token"]
+        scopes = row.get("scopes") or []
+        self.access_tokens[access] = AccessToken(
+            token=access, client_id=row["client_id"], scopes=scopes,
+            expires_at=row.get("expires_at"))
+        self.refresh_tokens[refresh] = RefreshToken(
+            token=refresh, client_id=row["client_id"], scopes=scopes,
+            expires_at=None)
+        self._access_to_refresh_map[access] = refresh
+        self._refresh_to_access_map[refresh] = access
+        if row.get("principal"):
+            self.principals[access] = row["principal"]
+
+    async def load_access_token(self, token: str):  # type: ignore[override]
+        obj = await super().load_access_token(token)
+        if obj is not None:
+            return obj
+        row = self.db.load_oauth_token_by_access(token)
+        if not row:
+            return None
+        exp = row.get("expires_at")
+        if exp is not None and exp < time.time():
+            self.db.delete_oauth_token(token)
+            return None
+        self._rehydrate_token(row)
+        return self.access_tokens.get(token)
+
+    async def load_refresh_token(self, client, refresh_token: str):  # type: ignore[override]
+        obj = await super().load_refresh_token(client, refresh_token)
+        if obj is not None:
+            return obj
+        row = self.db.load_oauth_token_by_refresh(refresh_token)
+        if not row or row["client_id"] != client.client_id:
+            return None
+        self._rehydrate_token(row)
+        return self.refresh_tokens.get(refresh_token)
+
+    async def revoke_token(self, token) -> None:  # type: ignore[override]
+        await super().revoke_token(token)
+        tok = getattr(token, "token", None)
+        if not tok:
+            return
+        self.db.delete_oauth_token(tok)  # if it was an access token
+        row = self.db.load_oauth_token_by_refresh(tok)  # if it was a refresh
+        if row:
+            self.db.delete_oauth_token(row["access_token"])
+
     async def exchange_authorization_code(self, client, authorization_code):  # type: ignore[override]
         token = await super().exchange_authorization_code(client, authorization_code)
         principal = self._code_principal.pop(authorization_code.code, None)
         if principal:
             self.principals[token.access_token] = principal
+        self._persist_token(token, principal or {})
         return token
 
     async def exchange_refresh_token(self, client, refresh_token, scopes):  # type: ignore[override]
-        token = await super().exchange_refresh_token(client, refresh_token, scopes)
         # carry the principal across the refresh: old access token -> new
         old_access = self._refresh_to_access_map.get(refresh_token.token)
         principal = self.principals.get(old_access) if old_access else None
+        token = await super().exchange_refresh_token(client, refresh_token, scopes)
         if principal:
             self.principals[token.access_token] = principal
+        # super() rotated the pair in memory; rotate the DB row to match.
+        if old_access:
+            self.db.delete_oauth_token(old_access)
+        self._persist_token(token, principal or {})
         return token
 
     def principal_for(self, token_str: str) -> dict | None:

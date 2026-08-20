@@ -137,6 +137,54 @@ class ClawpanelDB:
         except Exception:
             return None
 
+    # -- OAuth token persistence -------------------------------------------
+    # Same failure mode as mcp_clients: access/refresh tokens lived only in
+    # provider memory, and fly's auto-stop ("stop" when idle) wiped them —
+    # every connected ChatGPT session showed "connection has expired" after
+    # the next idle stop. Mirror issued tokens here, rehydrate on a memory
+    # miss, delete on revoke/rotation. Best-effort like save_client: memory
+    # still serves the current run if the DB write fails.
+
+    def save_oauth_token(self, *, access_token: str, refresh_token: str,
+                         client_id: str, scopes: list[str],
+                         expires_at: int | None, principal: dict) -> None:
+        req = urllib.request.Request(
+            f"{self.base}/rest/v1/mcp_oauth_tokens",
+            data=json.dumps({
+                "access_token": access_token, "refresh_token": refresh_token,
+                "client_id": client_id, "scopes": scopes,
+                "expires_at": expires_at, "principal": principal}).encode(),
+            headers=self._headers() | {"Content-Type": "application/json",
+                                       "Prefer": "resolution=merge-duplicates,return=minimal"},
+            method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30):
+                pass
+        except Exception:
+            pass  # best-effort: memory still serves this run
+
+    def load_oauth_token_by_access(self, access_token: str) -> dict | None:
+        try:
+            rows = self.get("mcp_oauth_tokens",
+                            f"access_token=eq.{access_token}&limit=1")
+            return rows[0] if rows else None
+        except Exception:
+            return None
+
+    def load_oauth_token_by_refresh(self, refresh_token: str) -> dict | None:
+        try:
+            rows = self.get("mcp_oauth_tokens",
+                            f"refresh_token=eq.{refresh_token}&limit=1")
+            return rows[0] if rows else None
+        except Exception:
+            return None
+
+    def delete_oauth_token(self, access_token: str) -> None:
+        try:
+            self.delete("mcp_oauth_tokens", f"access_token=eq.{access_token}")
+        except Exception:
+            pass
+
     def resolve_profile(self, email: str) -> dict | None:
         """email → {user_id, tenant_id}. The OAuth login gate calls this."""
         rows = self.get("profiles", f"email=eq.{urllib.parse.quote(email)}&limit=1")
