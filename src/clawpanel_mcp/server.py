@@ -4,6 +4,7 @@ Tools (tenant-scoped by the OAuth token — clients only ever see their own
 workspace):
 
   search / fetch       ChatGPT-compatible pair over the tenant KB (scope: kb)
+  ingest               add a document to the tenant KB, searchable via search (scope: kb)
   memory_search        semantic search over workspace memory (scope: memory)
   remember             add a memory item (scope: memory)
   agents               the workspace's agents (scope: brain)
@@ -29,9 +30,10 @@ from .backend import ClawpanelDB
 
 INSTRUCTIONS = """\
 ClawPanel — your OpenClaw workspace as tools. Search your knowledge base
-(search/fetch), search and add to workspace memory (memory_search/remember),
-and see what your agents are doing (agents, workspace_status, chat_history).
-Everything is scoped to your own workspace."""
+(search/fetch), add documents to it (ingest — extracted text from
+PDFs/docs/images becomes searchable), search and add to workspace memory
+(memory_search/remember), and see what your agents are doing (agents,
+workspace_status, chat_history). Everything is scoped to your own workspace."""
 
 _db: ClawpanelDB | None = None
 _provider = None
@@ -40,6 +42,8 @@ READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                             idempotentHint=True, openWorldHint=False)
 WRITE_MEMO = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
                              idempotentHint=False, openWorldHint=False)
+WRITE_KB = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+                           idempotentHint=True, openWorldHint=False)
 
 
 def _client() -> ClawpanelDB:
@@ -97,6 +101,20 @@ def build_server(*, base_url: str = "") -> FastMCP:
                 "text": row.get("content") or "",
                 "url": f"clawpanel://chunks/{row['id']}",
                 "metadata": {"chunk_index": row.get("chunk_index")}}
+
+    @mcp.tool(annotations=WRITE_KB, auth=[require_scopes("kb")])
+    async def ingest(title: str, text: str,
+                     source_url: str | None = None) -> dict[str, Any]:
+        """Add a document to your workspace knowledge base so it becomes
+        searchable. Pass the extracted text from a PDF/doc/image plus a short
+        title (and the source URL when you have one). Returns
+        {ingested: true, chunks: n, id} — re-ingesting the same source
+        updates it in place instead of duplicating."""
+        p = _principal()
+        res = await anyio.to_thread.run_sync(
+            lambda: _client().ingest_kb(p["tenant_id"], title, text,
+                                        source_url, p["user_id"]))
+        return res
 
     # -- memory -----------------------------------------------------------------
 

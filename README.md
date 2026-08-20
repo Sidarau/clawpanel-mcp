@@ -12,6 +12,7 @@ and the **alpha ring** of ClawPanel's public API surface.
 | Tool | What it does | Scope |
 |---|---|---|
 | `search` / `fetch` | ChatGPT-compatible pair over the tenant KB — `{results: [{id, title, url}]}`, `fetch(id)` → full text | `kb` |
+| `ingest` | Add a document (extracted text) to the tenant KB; searchable via `search`/`fetch` afterward. Idempotent per source | `kb` |
 | `memory_search` | Semantic search over workspace memory | `memory` |
 | `remember` | Add a memory item (note, decision, fact) | `memory` |
 | `agents` | The workspace's agents (name, model, gateway) | `brain` |

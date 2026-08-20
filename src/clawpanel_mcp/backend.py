@@ -8,17 +8,24 @@ layer (auth.py); tools never accept a tenant argument from the client.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any
 
-DEFAULT_BASE_URL = "https://nacktuyfdgobhzsqjtjv.supabase.co"
+DEFAULT_BASE_URL = "https://stxavgjhbfjbyperqcsy.supabase.co"
 NOXKEY_SERVICE = "zeuglab/clawpanel/CLAWPANEL_DB_SERVICE_ROLE_JWT"
 NOXKEY_NVIDIA = "zeuglab/eve/NVIDIA_API_KEY"
 EMBEDDING_MODEL = "nvidia/nv-embedqa-e5-v5"  # 1024-dim, asymmetric: query/passage
+EMBED_VARIANT = "nv-embedqa-e5-v5:passage"
+INGEST_CHUNKER = "clawpanel-word-window-v1"  # ≤460 tokens/chunk (512 embed cap)
+INGEST_MAX_CHUNK_TOKENS = 440  # conservative word-window cap (≈4 chars/token)
 
 
 def _noxkey(path: str) -> str | None:
@@ -78,6 +85,28 @@ class ClawpanelDB:
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"post {table} -> {e.code} {e.read()[:300]}") from e
 
+    def delete(self, table: str, params: str) -> None:
+        req = urllib.request.Request(f"{self.base}/rest/v1/{table}?{params}",
+                                     headers=self._headers(), method="DELETE")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"delete {table} -> {e.code} {e.read()[:300]}") from e
+
+    def patch(self, table: str, params: str, body: dict) -> Any:
+        req = urllib.request.Request(
+            f"{self.base}/rest/v1/{table}?{params}",
+            data=json.dumps(body).encode(),
+            headers=self._headers() | {"Content-Type": "application/json",
+                                       "Prefer": "return=representation"},
+            method="PATCH")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"patch {table} -> {e.code} {e.read()[:300]}") from e
+
     def _headers(self) -> dict:
         return {"apikey": self.key, "Authorization": f"Bearer {self.key}"}
 
@@ -120,6 +149,139 @@ class ClawpanelDB:
         rows = self.get("zme_chunks",
                         f"id=eq.{chunk_id}&tenant_id=eq.{tenant}&limit=1")
         return rows[0] if rows else None
+
+    # -- KB ingest --------------------------------------------------------------
+
+    def embed_passage(self, text: str) -> str | None:
+        """pgvector literal for one passage (input_type=passage — the stored
+        side of the asymmetric nv-embedqa-e5-v5; queries use input_type=query).
+        None when no NVIDIA key or the call fails — caller skips embedding and
+        the lexical arm (content_tsv) still covers retrieval."""
+        if not self.nvidia:
+            return None
+        req = urllib.request.Request(
+            "https://integrate.api.nvidia.com/v1/embeddings",
+            data=json.dumps({"model": EMBEDDING_MODEL, "input": [text],
+                             "input_type": "passage",
+                             "encoding_format": "float"}).encode(),
+            headers={"Authorization": f"Bearer {self.nvidia}",
+                     "Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                vec = json.loads(resp.read())["data"][0]["embedding"]
+            return "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
+        except Exception:
+            return None
+
+    @staticmethod
+    def _token_estimate(text: str) -> int:
+        """Rough ≈4 chars/token (≥1 per whitespace-separated word)."""
+        return max(1, (len(text) + 3) // 4)
+
+    def chunk_text(self, text: str,
+                   max_tokens: int = INGEST_MAX_CHUNK_TOKENS) -> list[str]:
+        """Simple word-window splitter — chunks stay ≤ max_tokens (≈4
+        chars/token), well under the 512-token embed cap."""
+        words = text.split()
+        chunks: list[str] = []
+        cur: list[str] = []
+        cur_tok = 0
+        for w in words:
+            wt = self._token_estimate(w)
+            if cur and cur_tok + wt > max_tokens:
+                chunks.append(" ".join(cur))
+                cur, cur_tok = [], 0
+            cur.append(w)
+            cur_tok += wt
+        if cur:
+            chunks.append(" ".join(cur))
+        return [c for c in chunks if c.strip()]
+
+    def ingest_kb(self, tenant: str, title: str, text: str,
+                  source_url: str | None = None,
+                  user_id: str | None = None) -> dict:
+        """Chunk + store a document in the tenant's KB and embed each chunk
+        (input_type=passage) when an NVIDIA key is present.
+
+        Every chunk row needs exactly one parent (zme_chunks_one_parent), so
+        each ingested doc gets a kb_pages row (the closest thing this schema
+        has to a `sources` table — it carries title/body and a per-tenant
+        unique slug) and chunks link to it via kb_page_id.
+
+        Idempotent: the doc's marker (sha256 of source_url, or title+text)
+        lives in context_prefix and drives the slug; re-ingesting the same
+        source updates the page and replaces its chunks in place instead of
+        duplicating.
+        """
+        text = (text or "").strip()
+        if not text:
+            raise RuntimeError("ingest: empty text — nothing to add to the KB")
+        title = (title or "Untitled").strip() or "Untitled"
+        marker = "doc:" + hashlib.sha256(
+            (source_url or f"{title}\n{text}").encode()).hexdigest()[:16]
+        slug = self._page_slug(title, marker)
+        now = datetime.now(timezone.utc).isoformat()
+
+        # source row: one kb_page per ingested doc, upserted by (tenant, slug)
+        page = self.get("kb_pages",
+                        f"tenant_id=eq.{tenant}&slug=eq.{slug}&limit=1")
+        page_body = {"tenant_id": tenant, "slug": slug, "title": title,
+                     "body_md": text, "summary": text[:300],
+                     "visibility": "workspace", "updated_at": now}
+        if page:
+            rows = self.patch("kb_pages", f"tenant_id=eq.{tenant}&slug=eq.{slug}",
+                              {k: v for k, v in page_body.items()
+                               if k not in ("tenant_id", "slug")})
+        else:
+            rows = self.post("kb_pages", page_body)
+        page = rows[0] if isinstance(rows, list) and rows else rows
+        page_id = page.get("id") if isinstance(page, dict) else None
+        if not page_id:
+            raise RuntimeError("ingest: could not create kb page")
+
+        # replace this doc's previous chunks in place (no duplication)
+        existing = self.get("zme_chunks",
+                            f"tenant_id=eq.{tenant}&context_prefix=eq.{marker}"
+                            f"&select=id")
+        if existing:
+            ids = ",".join(str(r["id"]) for r in existing)
+            self.delete("zme_chunks",
+                        f"tenant_id=eq.{tenant}&id=in.({ids})")
+
+        chunks = self.chunk_text(text)
+        embedded = 0
+        first_id: str | None = None
+        for i, chunk in enumerate(chunks):
+            row: dict[str, Any] = {
+                "tenant_id": tenant,
+                "kb_page_id": page_id,
+                "chunk_index": i,
+                "heading": title,
+                "context_prefix": marker,
+                "content": chunk,
+                "content_hash": hashlib.sha256(chunk.encode()).hexdigest(),
+                "token_count": self._token_estimate(chunk),
+                "chunker_version": INGEST_CHUNKER,
+            }
+            vec = self.embed_passage(chunk)
+            if vec:
+                row["embedding"] = vec
+                row["embed_variant"] = EMBED_VARIANT
+                row["embedded_at"] = now
+                embedded += 1
+            got = self.post("zme_chunks", row)
+            got = got[0] if isinstance(got, list) and got else got
+            if first_id is None and isinstance(got, dict):
+                first_id = got.get("id")
+        return {"ingested": True, "chunks": len(chunks),
+                "id": first_id, "embedded": embedded}
+
+    @staticmethod
+    def _page_slug(title: str, marker: str) -> str:
+        """Deterministic per-doc slug: slugified title + marker suffix, so
+        (tenant, slug) is unique and stable across re-ingests."""
+        base = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40]
+        return f"mcp-{base or 'doc'}-{marker[4:]}".strip("-")
 
     # -- memory -----------------------------------------------------------------
 
@@ -197,6 +359,3 @@ class ClawpanelDB:
         return self.get("chat_messages",
                         f"tenant_id=eq.{tenant}&select=role,content,created_at,agent_id"
                         f"&order=created_at.desc&limit={limit}")
-
-
-import urllib.parse  # noqa: E402  (kept at bottom: used by methods above)
