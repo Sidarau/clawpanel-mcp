@@ -126,10 +126,13 @@ class ClawpanelDB:
     def memory_search(self, tenant: str, query: str, k: int = 5) -> list[dict]:
         emb = self.embed_query(query)
         if emb:
-            return self.rpc("match_memory", {
-                "p_tenant": tenant, "p_query_embedding": emb,
-                "p_match_count": k}) or []
-        # lexical fallback when no embedding key
+            try:
+                return self.rpc("match_memory", {
+                    "p_tenant": tenant, "p_query_embedding": emb,
+                    "p_match_count": k}) or []
+            except RuntimeError:
+                pass  # match_memory not deployed on this backend — fall through
+        # lexical fallback when no embedding key or no match_memory RPC
         q = urllib.parse.quote(query.replace(" ", " | "))
         return self.get("memory_items",
                         f"tenant_id=eq.{tenant}&content_tsv=fts.{q}"
