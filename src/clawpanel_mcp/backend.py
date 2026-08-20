@@ -137,13 +137,26 @@ class ClawpanelDB:
 
     def search_kb(self, tenant: str, query: str, k: int = 8) -> list[dict]:
         """Tenant-scoped hybrid retrieval over zme_chunks (RLS table; we also
-        pass p_tenant and filter defensively)."""
+        pass p_tenant and filter defensively). zme_search returns chunk ids but
+        not headings — enrich with a single batched lookup so search results
+        carry a real title."""
         args: dict[str, Any] = {"p_tenant": tenant, "q_text": query, "k": k}
         emb = self.embed_query(query)
         if emb:
             args["q_embedding"] = emb
         rows = self.rpc("zme_search", args) or []
-        return [r for r in rows if str(r.get("tenant_id")) in (tenant, "None", "")]
+        rows = [r for r in rows if str(r.get("tenant_id")) in (tenant, "None", "")]
+        if rows:
+            ids = ",".join(str(r.get("chunk_id") or r.get("id")) for r in rows)
+            heads = self.get("zme_chunks",
+                             f"tenant_id=eq.{tenant}&id=in.({ids})"
+                             f"&select=id,heading,chunk_index")
+            by_id = {str(h["id"]): h for h in heads}
+            for r in rows:
+                h = by_id.get(str(r.get("chunk_id") or r.get("id")))
+                if h:
+                    r["heading"] = h.get("heading") or r.get("heading")
+        return rows
 
     def fetch_chunk(self, tenant: str, chunk_id: str) -> dict | None:
         rows = self.get("zme_chunks",
