@@ -113,7 +113,8 @@ def build_server(*, base_url: str = "") -> FastMCP:
         p = _principal()
         res = await anyio.to_thread.run_sync(
             lambda: _client().ingest_kb(p["tenant_id"], title, text,
-                                        source_url, p["user_id"]))
+                                        source_url, p["user_id"],
+                                        p.get("email")))
         return res
 
     # -- memory -----------------------------------------------------------------
@@ -134,9 +135,28 @@ def build_server(*, base_url: str = "") -> FastMCP:
         """Add a memory item to your workspace (a note, decision, or fact)."""
         p = _principal()
         row = await anyio.to_thread.run_sync(
-            lambda: _client().memory_add(p["tenant_id"], p["user_id"], text))
+            lambda: _client().memory_add(p["tenant_id"], p["user_id"], text,
+                                         p.get("email")))
         rid = row.get("id") if isinstance(row, dict) else None
         return f"remembered {rid or '(id unknown)'} in your workspace memory"
+
+    @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("memory")])
+    async def activity(limit: int = 40) -> str:
+        """The workspace's cross-surface trail, newest first: board changes,
+        documents ingested, and memories added — each with its timestamp and
+        who did it (by email). Use this for "what did X add today/yesterday"
+        questions; limit caps the entries returned."""
+        p = _principal()
+        rows = await anyio.to_thread.run_sync(
+            lambda: _client().activity(p["tenant_id"], min(100, max(1, limit))))
+        if not rows:
+            return "No activity recorded yet."
+        verb = {"kb_ingest": "added doc", "memory_add": "remembered"}
+        return "\n".join(
+            f"- {r.get('at', '?')} · {r.get('actor') or 'workspace'} · "
+            f"{verb.get(r.get('action') or '', (r.get('action') or '').replace('_', ' '))}"
+            + (f" — {r['title']}" if r.get("title") else "")
+            for r in rows)
 
     # -- workspace (brain) --------------------------------------------------------
 

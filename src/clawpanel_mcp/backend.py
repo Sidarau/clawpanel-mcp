@@ -330,7 +330,8 @@ class ClawpanelDB:
 
     def ingest_kb(self, tenant: str, title: str, text: str,
                   source_url: str | None = None,
-                  user_id: str | None = None) -> dict:
+                  user_id: str | None = None,
+                  actor: str | None = None) -> dict:
         """Chunk + store a document in the tenant's KB and embed each chunk
         (input_type=passage) when an NVIDIA key is present.
 
@@ -364,6 +365,8 @@ class ClawpanelDB:
                               {k: v for k, v in page_body.items()
                                if k not in ("tenant_id", "slug")})
         else:
+            if actor:
+                page_body["created_by"] = actor  # first writer owns attribution
             rows = self.post("kb_pages", page_body)
         page = rows[0] if isinstance(rows, list) and rows else rows
         page_id = page.get("id") if isinstance(page, dict) else None
@@ -431,13 +434,45 @@ class ClawpanelDB:
                         f"tenant_id=eq.{tenant}&content_tsv=fts.{q}"
                         f"&order=created_at.desc&limit={k}")
 
-    def memory_add(self, tenant: str, user_id: str, content: str) -> dict:
+    def memory_add(self, tenant: str, user_id: str, content: str,
+                   actor: str | None = None) -> dict:
         rows = self.post("memory_items", {
             "tenant_id": tenant,
             "content": content,
+            "created_by": actor,
             "metadata": {"source": "clawpanel-mcp", "user_id": user_id},
             "scope": "shared", "layer": "raw"})
         return rows[0] if isinstance(rows, list) and rows else rows
+
+    def activity(self, tenant: str, limit: int = 40) -> list[dict]:
+        """Cross-surface trail for one tenant, newest first:
+        pm_events (board changes) + kb_pages (docs ingested) + memory_items
+        (notes remembered). Each entry: {at, actor, action, title}."""
+        out: list[dict] = []
+        try:
+            for e in self.get("pm_events",
+                              f"tenant_id=eq.{tenant}"
+                              f"&order=created_at.desc&limit={limit}"):
+                out.append({"at": e.get("created_at"), "actor": e.get("actor"),
+                            "action": e.get("action"),
+                            "title": e.get("ref") or e.get("node_id")})
+        except Exception:
+            pass
+        for p in self.get("kb_pages",
+                          f"tenant_id=eq.{tenant}"
+                          f"&select=title,created_by,created_at"
+                          f"&order=created_at.desc&limit={limit}"):
+            out.append({"at": p.get("created_at"), "actor": p.get("created_by"),
+                        "action": "kb_ingest", "title": p.get("title")})
+        for m in self.get("memory_items",
+                          f"tenant_id=eq.{tenant}"
+                          f"&select=content,created_by,created_at"
+                          f"&order=created_at.desc&limit={limit}"):
+            out.append({"at": m.get("created_at"), "actor": m.get("created_by"),
+                        "action": "memory_add",
+                        "title": (m.get("content") or "")[:80]})
+        out.sort(key=lambda x: x.get("at") or "", reverse=True)
+        return out[:limit]
 
     # -- workspace ---------------------------------------------------------------
 
