@@ -190,6 +190,33 @@ class ClawpanelDB:
         rows = self.get("profiles", f"email=eq.{urllib.parse.quote(email)}&limit=1")
         return rows[0] if rows else None
 
+    def memberships_for(self, email: str) -> list[dict]:
+        """Every workspace this email belongs to: [{tenant_id, slug, name}].
+
+        One login can belong to several tenants (alex@ is in opencollective
+        AND mitchiesmind); the connector principal must come from a chosen
+        membership, not the single profiles.tenant_id row — which for alex@
+        points at an empty orphan tenant from signup."""
+        profile = self.resolve_profile(email)
+        if not profile:
+            return []
+        try:
+            rows = self.get("workspace_members",
+                            f"user_id=eq.{profile['user_id']}"
+                            "&select=tenant_id,tenants(slug,name)")
+        except Exception:
+            return [{"tenant_id": str(profile["tenant_id"]), "slug": None,
+                     "name": None}]
+        out = [{"tenant_id": str(r["tenant_id"]),
+                "slug": (r.get("tenants") or {}).get("slug"),
+                "name": (r.get("tenants") or {}).get("name")
+                or (r.get("tenants") or {}).get("slug")}
+               for r in rows]
+        if not out:  # no memberships: fall back to the profile tenant
+            out = [{"tenant_id": str(profile["tenant_id"]), "slug": None,
+                    "name": None}]
+        return out
+
     def verify_password(self, email: str, password: str) -> bool | None:
         """Check email+password against Supabase auth (the website credential).
 

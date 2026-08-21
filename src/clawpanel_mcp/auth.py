@@ -196,7 +196,7 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
     async def _authorize_post(self, request: Request) -> Any:
         form = await request.form()
         q = {k: str(v) for k, v in form.items()
-             if k not in ("email", "passphrase") and isinstance(v, str)}
+             if k not in ("email", "passphrase", "workspace") and isinstance(v, str)}
         email = str(form.get("email", "")).strip().lower()
         secret = str(form.get("passphrase", ""))
         cfg = self.profiles_cfg.get(email)
@@ -214,6 +214,22 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
         if not profile:
             return self._page(q, error='<span class="err">No ClawPanel workspace '
                                        'for this email.</span>')
+
+        # One email, several workspaces: the connector's tenant comes from a
+        # CHOSEN membership (picker page), not profiles.tenant_id. Single-
+        # membership accounts skip the picker entirely.
+        memberships = self.db.memberships_for(email)
+        if not memberships:
+            return self._page(q, error='<span class="err">No ClawPanel workspace '
+                                       'for this email.</span>')
+        picked = memberships[0]
+        if len(memberships) > 1:
+            choice = str(form.get("workspace", "")).strip()
+            match = next((m for m in memberships
+                          if choice in (m["slug"], m["tenant_id"])), None)
+            if match is None:
+                return self._workspace_page(q, memberships, email, secret)
+            picked = match
         # Env-less accounts (password-only) get the workspace-user scopes.
         default_scopes = ["brain", "memory", "kb"]
         scopes = [s for s in (cfg.get("scopes", default_scopes) if cfg else default_scopes)
@@ -242,7 +258,7 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
             if code:
                 self._code_principal[code] = {
                     "email": email,
-                    "tenant_id": str(profile["tenant_id"]),
+                    "tenant_id": str(picked["tenant_id"]),
                     "user_id": str(profile["user_id"]),
                     "scopes": scopes}
             return RedirectResponse(redirect_url, status_code=303)
@@ -254,6 +270,39 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
             f'<input type="hidden" name="{k}" value="{v}">' for k, v in q.items())
         return HTMLResponse(LOGIN_PAGE.format(
             client=q.get("client_id", "An MCP client"), error=error, hidden=hidden))
+
+    def _workspace_page(self, q: dict[str, Any], memberships: list[dict],
+                        email: str = "", secret: str = "") -> HTMLResponse:
+        """Second step after login when the account belongs to several
+        workspaces: which tenant should THIS connector serve? Credentials ride
+        along as hidden fields and are re-verified on submit — the picker is
+        not a session."""
+        options = "".join(
+            f'<option value="{m["slug"] or m["tenant_id"]}">'
+            f'{m["name"] or m["slug"] or m["tenant_id"]}</option>'
+            for m in memberships)
+        hidden = "".join(
+            f'<input type="hidden" name="{k}" value="{v}">' for k, v in q.items())
+        return HTMLResponse(f"""<!doctype html><html><head><meta charset="utf-8">
+<title>ClawPanel · pick a workspace</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{font-family:ui-sans-serif,system-ui;background:#0c1014;color:#e8e6e1;
+display:grid;place-items:center;height:100vh;margin:0}}
+form{{background:#131a21;border:1px solid #25313c;border-radius:12px;padding:2rem;
+width:320px;display:grid;gap:.9rem}}
+h1{{font-size:1.05rem;margin:0;font-weight:600}}p{{font-size:.8rem;color:#8fa0ae;margin:0}}
+select{{background:#0c1014;border:1px solid #25313c;border-radius:8px;color:#e8e6e1;
+padding:.6rem .7rem;font-size:.9rem}}
+button{{background:#4f8ef7;border:0;border-radius:8px;padding:.65rem;font-weight:600;
+cursor:pointer;color:#fff}}</style></head>
+<body><form method="post">
+<h1>Pick a workspace</h1>
+<p>This account belongs to {len(memberships)} workspaces. Which one should
+this connection use?</p>
+{hidden}
+<input type="hidden" name="email" value="{email}">
+<input type="hidden" name="passphrase" value="{secret}">
+<select name="workspace" required>{options}</select>
+<button type="submit">Connect</button></form></body></html>""")
 
 
 RINGS = ("alpha", "beta", "prod")
