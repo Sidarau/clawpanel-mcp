@@ -330,8 +330,7 @@ class ClawpanelDB:
 
     def ingest_kb(self, tenant: str, title: str, text: str,
                   source_url: str | None = None,
-                  user_id: str | None = None,
-                  actor: str | None = None) -> dict:
+                  user_id: str | None = None) -> dict:
         """Chunk + store a document in the tenant's KB and embed each chunk
         (input_type=passage) when an NVIDIA key is present.
 
@@ -365,8 +364,10 @@ class ClawpanelDB:
                               {k: v for k, v in page_body.items()
                                if k not in ("tenant_id", "slug")})
         else:
-            if actor:
-                page_body["created_by"] = actor  # first writer owns attribution
+            # kb_pages.created_by is a uuid FK to auth.users (schema-native) —
+            # store the user id, never the email.
+            if user_id:
+                page_body["created_by"] = user_id
             rows = self.post("kb_pages", page_body)
         page = rows[0] if isinstance(rows, list) and rows else rows
         page_id = page.get("id") if isinstance(page, dict) else None
@@ -434,12 +435,11 @@ class ClawpanelDB:
                         f"tenant_id=eq.{tenant}&content_tsv=fts.{q}"
                         f"&order=created_at.desc&limit={k}")
 
-    def memory_add(self, tenant: str, user_id: str, content: str,
-                   actor: str | None = None) -> dict:
+    def memory_add(self, tenant: str, user_id: str, content: str) -> dict:
         rows = self.post("memory_items", {
             "tenant_id": tenant,
             "content": content,
-            "created_by": actor,
+            "created_by": user_id,  # uuid FK, same convention as kb_pages
             "metadata": {"source": "clawpanel-mcp", "user_id": user_id},
             "scope": "shared", "layer": "raw"})
         return rows[0] if isinstance(rows, list) and rows else rows
@@ -472,6 +472,22 @@ class ClawpanelDB:
                         "action": "memory_add",
                         "title": (m.get("content") or "")[:80]})
         out.sort(key=lambda x: x.get("at") or "", reverse=True)
+
+        # created_by on kb/memory rows is a user uuid — resolve to email so
+        # the trail reads as people, not ids.
+        ids = {r["actor"] for r in out
+               if r.get("actor") and "@" not in str(r["actor"])}
+        if ids:
+            quoted = ",".join(str(i) for i in ids)
+            try:
+                profs = self.get("profiles",
+                                 f"user_id=in.({quoted})&select=user_id,email")
+                by_id = {str(pr["user_id"]): pr.get("email") for pr in profs}
+                for r in out:
+                    if r.get("actor") in by_id:
+                        r["actor"] = by_id[r["actor"]]
+            except Exception:
+                pass
         return out[:limit]
 
     # -- workspace ---------------------------------------------------------------

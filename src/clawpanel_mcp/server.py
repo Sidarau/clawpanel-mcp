@@ -113,8 +113,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
         p = _principal()
         res = await anyio.to_thread.run_sync(
             lambda: _client().ingest_kb(p["tenant_id"], title, text,
-                                        source_url, p["user_id"],
-                                        p.get("email")))
+                                        source_url, p["user_id"]))
         return res
 
     # -- memory -----------------------------------------------------------------
@@ -135,8 +134,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
         """Add a memory item to your workspace (a note, decision, or fact)."""
         p = _principal()
         row = await anyio.to_thread.run_sync(
-            lambda: _client().memory_add(p["tenant_id"], p["user_id"], text,
-                                         p.get("email")))
+            lambda: _client().memory_add(p["tenant_id"], p["user_id"], text))
         rid = row.get("id") if isinstance(row, dict) else None
         return f"remembered {rid or '(id unknown)'} in your workspace memory"
 
