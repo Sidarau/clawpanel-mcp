@@ -227,6 +227,37 @@ def build_server(*, base_url: str = "") -> FastMCP:
             f"[{str(r.get('created_at'))[:16]}] {r.get('role')}: "
             f"{(r.get('content') or '')[:200]}" for r in rows)
 
+    # -- orchestrator: one stable tool, ever-growing server-side registry ------
+    # New capabilities are added as REGISTRY ACTIONS (server-side) instead of
+    # new MCP tools, because ChatGPT caches the tool list at connect time —
+    # a new action needs no reconnect; a new tool does. The GPT discovers
+    # what's available at runtime via action="list".
+    from clawpanel_mcp.orchestrator import ACTIONS, run_action
+
+    @mcp.tool(annotations=WRITE_MEMO, auth=[require_scopes("memory")])
+    async def studio(action: str, params: dict[str, Any] | None = None) -> str:
+        """General-purpose workspace action runner — the extensible surface.
+        New capabilities appear here WITHOUT reconnecting this connector:
+        call studio("list") to see every action with its parameters, then
+        studio(action_name, {...}) to run it. Prefer this when the dedicated
+        tools don't cover what you need."""
+        p = _principal()
+        if action in ("list", "list_actions", "help"):
+            lines = [f"{name} — {meta['description']}"
+                     + (f" (params: {meta['params']})" if meta.get("params") else "")
+                     for name, meta in sorted(ACTIONS.items())]
+            return "Available studio actions:\n" + "\n".join(lines)
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: run_action(action, params or {}, p, _client()))
+        except KeyError:
+            return (f"Unknown studio action {action!r}. "
+                    f"Call studio(\"list\") for the available actions.")
+        except PermissionError as e:
+            return f"Not permitted: {e}"
+        except Exception as e:
+            return f"studio action {action!r} failed: {e}"
+
     return mcp
 
 
