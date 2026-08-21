@@ -211,7 +211,8 @@ class ClawpanelDB:
                 "slug": (r.get("tenants") or {}).get("slug"),
                 "name": (r.get("tenants") or {}).get("name")
                 or (r.get("tenants") or {}).get("slug")}
-               for r in rows]
+               for r in rows
+               if (r.get("tenants") or {}).get("slug")]  # hide slug-less orphans (e.g. signup auto-tenant)
         if not out:  # no memberships: fall back to the profile tenant
             out = [{"tenant_id": str(profile["tenant_id"]), "slug": None,
                     "name": None}]
