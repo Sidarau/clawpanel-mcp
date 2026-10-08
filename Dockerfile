@@ -10,7 +10,8 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8080
 
 # Secrets arrive as env vars (fly secrets):
-#   ZME_SUPABASE_KEY   (anon — never the service-role key)
+#   CLAWPANEL_DB_KEY  (server-only Supabase secret API key)
+#   CLAWPANEL_DB_URL  (matching Supabase project URL)
+#   CLAWPANEL_OAUTH_PROFILES (existing scoped OAuth profiles)
 #   NVIDIA_API_KEY     (optional; enables the vector arm of hybrid search)
-#   ZME_MCP_TOKEN      (bearer token guarding /mcp)
 CMD ["sh", "-c", "clawpanel-mcp --http --host 0.0.0.0 --port ${PORT}"]
