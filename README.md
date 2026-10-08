@@ -42,7 +42,7 @@ direct connections). Token contract is frozen from alpha.
 | Variable | Purpose |
 |---|---|
 | `CLAWPANEL_DB_URL` | Supabase project URL (defaults to the clawpanel_db project) |
-| `CLAWPANEL_DB_KEY` | service-role JWT. **Server-only** — it bypasses RLS, so tenant isolation is enforced in code on every query. Auto-resolves from NoxKey `zeuglab/clawpanel/CLAWPANEL_DB_SERVICE_ROLE_JWT` on macOS. |
+| `CLAWPANEL_DB_KEY` | Supabase secret API key or service-role JWT. **Server-only** — it bypasses RLS, so tenant isolation is enforced in code on every query. Explicit environment values win; otherwise an enrolled Zeug Keys client resolves `zeuglab/clawpanel/CLAWPANEL_DB_SUPABASE_SECRET_KEY` through a private pipe. |
 | `CLAWPANEL_OAUTH_PROFILES` | JSON: `{"client@co.com": {"secret": "…", "scopes": ["brain","memory","kb"]}}` |
 | `CLAWPANEL_BASE_URL` | Public URL (for OAuth metadata/redirects) |
 | `CLAWPANEL_RING` | `alpha` (default) / `beta` / `prod` |
@@ -54,6 +54,8 @@ direct connections). Token contract is frozen from alpha.
 uvicorn-grade Docker deploy: see Dockerfile + fly.toml → flyctl deploy
 # local:
 CLAWPANEL_OAUTH_PROFILES='{...}' clawpanel-mcp --http --port 8080
+# Or inject the matching database credential from the cloud vault:
+zeug-key run CLAWPANEL_DB_KEY=zeuglab/clawpanel/CLAWPANEL_DB_SUPABASE_SECRET_KEY -- clawpanel-mcp --http --port 8080
 # → POST /mcp · GET /healthz · OAuth at /.well-known/*
 ```
 

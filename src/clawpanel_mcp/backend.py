@@ -18,9 +18,10 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any
+from .zeug_credentials import resolve, CredentialError
 
-DEFAULT_BASE_URL = "https://stxavgjhbfjbyperqcsy.supabase.co"
-NOXKEY_SERVICE = "zeuglab/clawpanel/CLAWPANEL_DB_SERVICE_ROLE_JWT"
+DEFAULT_BASE_URL = "https://nacktuyfdgobhzsqjtjv.supabase.co"
+SERVICE_KEY_REFERENCE = "zeuglab/clawpanel/CLAWPANEL_DB_SUPABASE_SECRET_KEY"
 NOXKEY_NVIDIA = "zeuglab/eve/NVIDIA_API_KEY"
 EMBEDDING_MODEL = "nvidia/nv-embedqa-e5-v5"  # 1024-dim, asymmetric: query/passage
 EMBED_VARIANT = "nv-embedqa-e5-v5:passage"
@@ -41,11 +42,14 @@ def _noxkey(path: str) -> str | None:
 class ClawpanelDB:
     def __init__(self) -> None:
         self.base = (os.environ.get("CLAWPANEL_DB_URL") or DEFAULT_BASE_URL).rstrip("/")
-        key = os.environ.get("CLAWPANEL_DB_KEY") or _noxkey(NOXKEY_SERVICE)
+        try:
+            key = resolve(SERVICE_KEY_REFERENCE, env="CLAWPANEL_DB_KEY")
+        except CredentialError as exc:
+            raise RuntimeError(f"{SERVICE_KEY_REFERENCE}: {exc}") from None
         if not key:
             raise RuntimeError(
                 "clawpanel-mcp: missing Supabase service key. Set CLAWPANEL_DB_KEY "
-                f"(or store it in NoxKey at {NOXKEY_SERVICE}).")
+                f"(or enroll Zeug Keys with {SERVICE_KEY_REFERENCE}).")
         self.key = key
         self.nvidia = os.environ.get("NVIDIA_API_KEY") or _noxkey(NOXKEY_NVIDIA)
 
