@@ -11,7 +11,8 @@ requires-python = ">=3.10"
 license = { text = "Proprietary" }
 authors = [{ name = "Alex Sidarau", email = "alex@zeuglab.com" }]
 dependencies = [
-    "fastmcp>=3.4.5",
+    # The server uses the FastMCP 3.4 middleware and auth APIs.
+    "fastmcp==3.4.7",
     "uvicorn>=0.30",
 ]
 

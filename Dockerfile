@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8080
 
 # Secrets arrive as env vars (fly secrets):
-#   ZME_SUPABASE_KEY   (anon — never the service-role key)
-#   NVIDIA_API_KEY     (optional; enables the vector arm of hybrid search)
-#   ZME_MCP_TOKEN      (bearer token guarding /mcp)
+#   CLAWPANEL_DB_KEY          (server-only service role)
+#   CLAWPANEL_OAUTH_PROFILES  (legacy connector profile configuration)
+#   NVIDIA_API_KEY            (optional vector search)
 CMD ["sh", "-c", "clawpanel-mcp --http --host 0.0.0.0 --port ${PORT}"]
