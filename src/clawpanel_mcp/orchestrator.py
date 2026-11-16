@@ -20,16 +20,19 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .work_library import authority_message
+
 Handler = Callable[..., str]
 
 ACTIONS: dict[str, dict[str, Any]] = {}
 
 
 def action(name: str, *, scope: str, description: str,
-           params: str = "") -> Callable[[Handler], Handler]:
+           params: str = "", legacy_work_library: bool = True) -> Callable[[Handler], Handler]:
     def deco(fn: Handler) -> Handler:
         ACTIONS[name] = {"fn": fn, "scope": scope,
-                         "description": description, "params": params}
+                         "description": description, "params": params,
+                         "legacy_work_library": legacy_work_library}
         return fn
     return deco
 
@@ -44,6 +47,9 @@ def run_action(name: str, params: dict, principal: dict, db) -> str:
         raise PermissionError(
             f"action {name!r} needs the {need!r} scope; this connection has "
             f"{sorted(have) or 'none'}")
+    if meta["legacy_work_library"]:
+        if message := authority_message(principal["tenant_id"]):
+            raise PermissionError(message)
     if not isinstance(params, dict):
         raise ValueError("params must be an object")
     return meta["fn"](db, principal, **params)
@@ -79,7 +85,7 @@ def _ingest_text(db, p, title: str, text: str,
 
 @action("remember_note", scope="memory",
         description="Save a note, decision, or fact to workspace memory.",
-        params="text")
+        params="text", legacy_work_library=False)
 def _remember_note(db, p, text: str) -> str:
     row = db.memory_add(p["tenant_id"], p["user_id"], text)
     rid = row.get("id") if isinstance(row, dict) else None

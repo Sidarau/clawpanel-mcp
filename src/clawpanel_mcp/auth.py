@@ -305,13 +305,7 @@ this connection use?</p>
 <button type="submit">Connect</button></form></body></html>""")
 
 
-RINGS = ("alpha", "beta", "prod")
-
-
-def build_auth(base_url: str, db) -> ClawpanelOAuthProvider | None:
-    ring = (os.environ.get("CLAWPANEL_RING") or "alpha").strip().lower()
-    if ring not in RINGS:
-        raise RuntimeError(f"CLAWPANEL_RING must be one of {RINGS}")
+def build_auth(base_url: str, db) -> ClawpanelOAuthProvider:
     cfg_json = os.environ.get("CLAWPANEL_OAUTH_PROFILES", "")
     if not cfg_json:
         raise RuntimeError(

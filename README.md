@@ -5,7 +5,8 @@
 only their own workspace: knowledge base, memory, agents, and activity.
 
 This is the client-facing sibling of [zme-mcp](https://github.com/Sidarau/zme-mcp)
-and the **alpha ring** of ClawPanel's public API surface.
+and an existing compatibility connector for cloud workspaces. The hosted web
+API and the linked workplace server have separate connection contracts.
 
 ## Tools
 
@@ -23,19 +24,20 @@ Every tool is **tenant-scoped by the OAuth token**. The client never passes a
 tenant id; the server resolves it from the authenticated profile and filters
 every query server-side.
 
-## How auth works (alpha)
+## How auth works
 
 Full OAuth 2.1: DCR, PKCE, authorization codes, refresh, revocation.
 
 1. ChatGPT/Claude discovers metadata, registers itself (DCR), opens `/authorize`.
-2. The client signs in with **their ClawPanel email + passphrase**.
-3. The server resolves email → `profiles` row → `tenant_id` and issues a token
-   whose scopes come from server-side profile config — never from the request.
+2. The client signs in with their ClawPanel email and account password. A
+   configured legacy connector passphrase may still work for an existing profile.
+3. The server looks up the authenticated account's memberships and asks the user
+   to choose a workplace if necessary. It binds the token to the chosen
+   membership and server-assigned scopes.
 4. Scopes mirror the `mcp_tokens` vocabulary: `brain`, `memory`, `kb`, `drive`.
 
-Rings: `alpha` (passphrases in env, in-memory sessions) → `beta` (Supabase
-auth sessions, persistent grants) → `prod` (per-profile labels, RLS-enforced
-direct connections). Token contract is frozen from alpha.
+OAuth client registrations and grants persist across restarts. The former
+`CLAWPANEL_RING` setting was a label; it did not select an auth implementation.
 
 ## Configuration
 
@@ -45,14 +47,13 @@ direct connections). Token contract is frozen from alpha.
 | `CLAWPANEL_DB_KEY` | service-role JWT. **Server-only** — it bypasses RLS, so tenant isolation is enforced in code on every query. Auto-resolves from NoxKey `zeuglab/clawpanel/CLAWPANEL_DB_SERVICE_ROLE_JWT` on macOS. |
 | `CLAWPANEL_OAUTH_PROFILES` | JSON: `{"client@co.com": {"secret": "…", "scopes": ["brain","memory","kb"]}}` |
 | `CLAWPANEL_BASE_URL` | Public URL (for OAuth metadata/redirects) |
-| `CLAWPANEL_RING` | `alpha` (default) / `beta` / `prod` |
 | `NVIDIA_API_KEY` | Optional — enables vector arm of hybrid KB search and semantic memory search |
+| `CLAWPANEL_WORK_LIBRARY_MODE_<TENANT>` | Matches the hosted web cutover setting. `<TENANT>` is the authenticated workplace UUID, uppercase with hyphens replaced by underscores. See [cutover checks](docs/WORK_LIBRARY_CUTOVER.md). |
 
 ## Run
 
 ```bash
-uvicorn-grade Docker deploy: see Dockerfile + fly.toml → flyctl deploy
-# local:
+# Local, with credentials privately injected:
 CLAWPANEL_OAUTH_PROFILES='{...}' clawpanel-mcp --http --port 8080
 # → POST /mcp · GET /healthz · OAuth at /.well-known/*
 ```
@@ -60,15 +61,16 @@ CLAWPANEL_OAUTH_PROFILES='{...}' clawpanel-mcp --http --port 8080
 ## Connect from ChatGPT
 
 Settings → Security and login → Developer mode → on, then
-chatgpt.com/plugins → **+** → `https://clawpanel-mcp.fly.dev/mcp` → sign in
-with your ClawPanel email + passphrase. Works in deep research (`search`/`fetch`
-make your KB citable).
+Use the [existing connector instructions](docs/CUSTOM_GPT.md) for a cloud
+workplace. For linked Work and Library, use the connection supplied by the
+workplace server.
 
 ## Verification
 
-`scripts/verify_clawpanel.py` runs the full OAuth dance for two tenants and
-asserts **tenant isolation** (each sees only their own agents/chat, cross-tenant
-fetch returns nothing), scope gating, and every tool against live data.
+`uv run --locked python -m unittest discover -s tests -v` verifies the cutover
+contract with a synthetic database over authenticated MCP HTTP. The separate
+`scripts/verify_clawpanel.py` is a live smoke tool that performs writes; use it
+only against an approved test workplace.
 
 ## KB ingestion (`ingest`)
 

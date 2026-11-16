@@ -1,19 +1,16 @@
 # ClawPanel Custom GPT — setup
 
-OpenAI has no API for creating GPTs — this is a 3-minute manual setup, once.
-The design below is **per-tenant by construction**: the GPT carries only
-personality and instructions; each user adds the ClawPanel connector and signs
-in with *their own* email, so every user of the same GPT sees only *their own*
-workspace. There is no way for one client to land in another's data.
+This guide describes the existing cloud compatibility connector. Confirm that
+the user's workplace still serves its knowledge base through this connector
+before onboarding them. Connected workplace servers have their own connection.
+Each user signs in independently and selects a workplace they belong to.
 
 ## 1. The connector (each user, once)
 
 ChatGPT → Settings → Security and login → Developer mode → on.
 chatgpt.com/plugins → **+** → `https://clawpanel-mcp.fly.dev/mcp`
-→ sign in with your ClawPanel email + passphrase.
-
-(The passphrase is issued with the workspace — alpha ring. In beta this becomes
-Supabase auth; the URL stays the same.)
+→ sign in with your ClawPanel account. Choose the intended workplace if
+prompted. Keep any existing compatibility passphrase in its approved vault.
 
 ## 2. The GPT (workspace owner, once)
 
@@ -45,16 +42,6 @@ Rules:
   - "What do we know about <topic>?"
   - "Remember this: <decision>"
 - Publish as **Link-only** (clients get the link from you).
-
-## 3. Client onboarding message (copy/paste)
-
-```
-Your ClawPanel GPT: <link>
-1. Open it, then add the connector when prompted
-   (URL: https://clawpanel-mcp.fly.dev/mcp).
-2. Sign in with <their-email> and your passphrase: <issued-per-client>
-You only ever see your own workspace — the sign-in is what scopes you.
-```
 
 ## Why not GPT "Actions"?
 

@@ -27,6 +27,7 @@ from fastmcp.tools.tool import ToolAnnotations
 
 from .auth import build_auth
 from .backend import ClawpanelDB
+from .work_library import WorkLibraryCutover, authority_message
 
 INSTRUCTIONS = """\
 ClawPanel — your OpenClaw workspace as tools. Search your knowledge base
@@ -69,6 +70,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
     db = _client()
     _provider = build_auth(base_url, db)
     mcp = FastMCP(name="clawpanel-mcp", instructions=INSTRUCTIONS, auth=_provider)
+    mcp.add_middleware(WorkLibraryCutover(_principal))
 
     from fastmcp.server.auth import require_scopes
 
@@ -243,9 +245,11 @@ def build_server(*, base_url: str = "") -> FastMCP:
         tools don't cover what you need."""
         p = _principal()
         if action in ("list", "list_actions", "help"):
+            cutover = authority_message(p["tenant_id"])
             lines = [f"{name} — {meta['description']}"
                      + (f" (params: {meta['params']})" if meta.get("params") else "")
-                     for name, meta in sorted(ACTIONS.items())]
+                     for name, meta in sorted(ACTIONS.items())
+                     if not cutover or not meta["legacy_work_library"]]
             return "Available studio actions:\n" + "\n".join(lines)
         try:
             return await anyio.to_thread.run_sync(
