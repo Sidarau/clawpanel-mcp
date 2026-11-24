@@ -39,6 +39,7 @@ from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.routing import Route
 
 ALL_SCOPES = ["brain", "memory", "kb", "drive", "approvals", "edit", "create"]
+WORK_READ_SCOPE = "work:read"
 HOST_SCOPES = ["approvals", "edit", "create"]  # workspace-host capabilities
 AUTH_PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 
@@ -56,7 +57,7 @@ cursor:pointer;color:#fff}}.err{{color:#e08585;font-size:.8rem}}</style></head>
 <body><form method="post">
 <h1>ClawPanel</h1>
 <p>{client} wants access to your workspace. Sign in with the email on your
-ClawPanel account.</p>
+ClawPanel account.{work_notice}</p>
 {error}
 <input type="email" name="email" placeholder="you@company.com" autocomplete="username" required>
 <input type="password" name="passphrase" placeholder="passphrase"
@@ -66,11 +67,13 @@ ClawPanel account.</p>
 
 
 class ClawpanelOAuthProvider(InMemoryOAuthProvider):
-    def __init__(self, base_url: str, db, profiles_cfg: dict[str, dict]):
+    def __init__(self, base_url: str, db, profiles_cfg: dict[str, dict], *, work_read: bool = False):
+        self.valid_scopes = [*ALL_SCOPES, WORK_READ_SCOPE] if work_read else ALL_SCOPES
+        self.default_scopes = ["kb", WORK_READ_SCOPE] if work_read else ["kb"]
         super().__init__(
             base_url=base_url,
             client_registration_options=ClientRegistrationOptions(
-                enabled=True, valid_scopes=ALL_SCOPES, default_scopes=["kb"]),
+                enabled=True, valid_scopes=self.valid_scopes, default_scopes=self.default_scopes),
             required_scopes=["kb"],
         )
         self.db = db
@@ -221,9 +224,9 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
                 return self._workspace_page(q, memberships, email)
             picked = match
         # Env-less accounts (password-only) get the workspace-user scopes.
-        default_scopes = ["brain", "memory", "kb"]
+        default_scopes = ["brain", "memory", *self.default_scopes]
         scopes = [s for s in (cfg.get("scopes", default_scopes) if cfg else default_scopes)
-                  if s in ALL_SCOPES]
+                  if s in self.valid_scopes]
         try:
             client = await self.get_client(str(q["client_id"]))
             if client is None:
@@ -257,8 +260,11 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
     def _page(self, q: dict[str, Any], error: str) -> HTMLResponse:
         hidden = "".join(
             f'<input type="hidden" name="{escape(k)}" value="{escape(str(v))}">' for k, v in q.items())
+        notice = (" The connection can read your accessible Work issues and linked shared Library documents."
+                  if WORK_READ_SCOPE in self.valid_scopes else "")
         return HTMLResponse(LOGIN_PAGE.format(
-            client=escape(str(q.get("client_id", "An MCP client"))), error=error, hidden=hidden),
+            client=escape(str(q.get("client_id", "An MCP client"))), error=error, hidden=hidden,
+            work_notice=notice),
             headers=AUTH_PAGE_HEADERS)
 
     def _workspace_page(self, q: dict[str, Any], memberships: list[dict],
@@ -295,7 +301,7 @@ this connection use?</p>
 RINGS = ("alpha", "beta", "prod")
 
 
-def build_auth(base_url: str, db) -> ClawpanelOAuthProvider | None:
+def build_auth(base_url: str, db, *, work_read: bool = False) -> ClawpanelOAuthProvider | None:
     ring = (os.environ.get("CLAWPANEL_RING") or "alpha").strip().lower()
     if ring not in RINGS:
         raise RuntimeError(f"CLAWPANEL_RING must be one of {RINGS}")
@@ -305,4 +311,4 @@ def build_auth(base_url: str, db) -> ClawpanelOAuthProvider | None:
             "clawpanel-mcp HTTP needs CLAWPANEL_OAUTH_PROFILES — JSON like "
             '{"client@co.com": {"secret": "…", "scopes": ["brain","memory","kb"]}}')
     profiles_cfg = json.loads(cfg_json)
-    return ClawpanelOAuthProvider(base_url=base_url, db=db, profiles_cfg=profiles_cfg)
+    return ClawpanelOAuthProvider(base_url=base_url, db=db, profiles_cfg=profiles_cfg, work_read=work_read)

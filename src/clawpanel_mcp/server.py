@@ -3,6 +3,7 @@
 Tools (tenant-scoped by the OAuth token — clients only ever see their own
 workspace):
 
+  work_issue_read      read a Work issue and linked Library SOPs (scope: work:read)
   search / fetch       ChatGPT-compatible pair over the tenant KB (scope: kb)
   ingest               add a document to the tenant KB, searchable via search (scope: kb)
   memory_search        semantic search over workspace memory (scope: memory)
@@ -18,15 +19,17 @@ tenant-aware.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Annotated, Any
 
 import anyio
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.tools.tool import ToolAnnotations
+from pydantic import Field
 
-from .auth import build_auth
+from .auth import WORK_READ_SCOPE, build_auth
 from .backend import ClawpanelDB
+from .work import read_work_issue
 
 INSTRUCTIONS = """\
 ClawPanel — your OpenClaw workspace as tools. Search your knowledge base
@@ -67,10 +70,28 @@ async def _principal() -> dict:
 def build_server(*, base_url: str = "") -> FastMCP:
     global _provider
     db = _client()
-    _provider = build_auth(base_url, db)
+    work_read = os.environ.get("CLAWPANEL_CONNECTOR_WORK_READ") == "1"
+    _provider = build_auth(base_url, db, work_read=work_read)
     mcp = FastMCP(name="clawpanel-mcp", instructions=INSTRUCTIONS, auth=_provider)
 
     from fastmcp.server.auth import require_scopes
+
+    if work_read:
+        @mcp.tool(title="Read a ClawPanel Work issue", annotations=READ_ONLY,
+                  auth=[require_scopes(WORK_READ_SCOPE)])
+        async def work_issue_read(
+            issue: Annotated[str, Field(
+                min_length=1, max_length=80,
+                description="ClawPanel issue UUID or identifier, such as ZEU-10.",
+            )],
+        ) -> dict[str, Any]:
+            """Read one issue in the connected workspace, with recent comments and
+            shared Library SOPs linked from its description. Returns source links
+            for the SOPs. Use the issue ID that the user provides or selects."""
+            token = get_access_token()
+            if token is None:
+                raise RuntimeError("Reconnect ClawPanel with Work read access.")
+            return await read_work_issue(token.token, issue)
 
     # -- KB (ChatGPT deep-research compatible pair) --------------------------
 

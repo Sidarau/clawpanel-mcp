@@ -12,6 +12,7 @@ license = { text = "Proprietary" }
 authors = [{ name = "Alex Sidarau", email = "alex@zeuglab.com" }]
 dependencies = [
     "fastmcp>=3.4.5",
+    "httpx>=0.28,<1",
     "uvicorn>=0.30",
 ]
 
