@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import time
 import urllib.parse
@@ -31,16 +32,22 @@ import anyio
 from pydantic import AnyUrl
 
 from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
+from mcp.server.auth.handlers.metadata import MetadataHandler
+from mcp.server.auth.middleware.client_auth import AuthenticationError, ClientAuthenticator
 from mcp.server.auth.provider import AccessToken, AuthorizationParams, RefreshToken, TokenError
-from mcp.server.auth.settings import ClientRegistrationOptions
+from mcp.server.auth.routes import REVOCATION_PATH, build_metadata, cors_middleware
+from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 from mcp.shared.auth import OAuthClientInformationFull
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 ALL_SCOPES = ["brain", "memory", "kb", "drive", "approvals", "edit", "create"]
 WORK_READ_SCOPE = "work:read"
 HOST_SCOPES = ["approvals", "edit", "create"]  # workspace-host capabilities
+OAUTH_TOKEN = re.compile(r"[A-Za-z0-9._~-]{1,512}")
+AUTH_METADATA_PATH = "/.well-known/oauth-authorization-server"
+REVOCATION_HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 AUTH_PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 
 LOGIN_PAGE = """<!doctype html><html><head><meta charset="utf-8">
@@ -74,9 +81,11 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
             base_url=base_url,
             client_registration_options=ClientRegistrationOptions(
                 enabled=True, valid_scopes=self.valid_scopes, default_scopes=self.default_scopes),
+            revocation_options=RevocationOptions(enabled=True),
             required_scopes=["kb"],
         )
         self.db = db
+        self.client_authenticator = ClientAuthenticator(self)
         self.profiles_cfg = {k.strip().lower(): v for k, v in profiles_cfg.items()}
         self._code_principal: dict[str, dict] = {}
 
@@ -178,10 +187,35 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
 
     def get_routes(self, mcp_path: str | None = None) -> list[Route]:
         routes = super().get_routes(mcp_path)
-        return [r for r in routes if not (getattr(r, "path", None) == "/authorize")] + [
+        metadata = build_metadata(self.base_url, self.service_documentation_url,
+                                  self.client_registration_options, self.revocation_options)
+        for field in ("token_endpoint_auth_methods_supported", "revocation_endpoint_auth_methods_supported"):
+            setattr(metadata, field, [*getattr(metadata, field), "none"])
+        get_metadata = cors_middleware(MetadataHandler(metadata).handle, ["GET", "OPTIONS"])
+        replaced = ("/authorize", REVOCATION_PATH, AUTH_METADATA_PATH)
+        return [r for r in routes if getattr(r, "path", None) not in replaced] + [
+            Route(AUTH_METADATA_PATH, get_metadata, methods=["GET", "OPTIONS"]),
             Route("/authorize", self._authorize_get, methods=["GET"]),
             Route("/authorize", self._authorize_post, methods=["POST"]),
+            Route(REVOCATION_PATH, cors_middleware(self._revoke_connection, ["POST", "OPTIONS"]),
+                  methods=["POST", "OPTIONS"]),
         ]
+
+    async def _revoke_connection(self, request: Request) -> Response:
+        try:
+            client = await self.client_authenticator.authenticate_request(request)
+        except AuthenticationError:
+            return JSONResponse({"error": "unauthorized_client"}, status_code=401, headers=REVOCATION_HEADERS)
+
+        token = (await request.form()).get("token")
+        if not isinstance(token, str) or not token:
+            return JSONResponse({"error": "invalid_request"}, status_code=400, headers=REVOCATION_HEADERS)
+        if OAUTH_TOKEN.fullmatch(token):
+            try:
+                await anyio.to_thread.run_sync(self.db.revoke_oauth_connection, client.client_id, token)
+            except Exception:
+                return JSONResponse({"error": "temporarily_unavailable"}, status_code=503, headers=REVOCATION_HEADERS)
+        return Response(status_code=200, headers=REVOCATION_HEADERS)
 
     async def _authorize_get(self, request: Request) -> HTMLResponse:
         return self._page(dict(request.query_params), error="")

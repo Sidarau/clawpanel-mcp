@@ -35,6 +35,8 @@ Full OAuth 2.1: DCR, PKCE, authorization codes, refresh, revocation.
    client registration.
 4. Work reads recheck the grant, membership, app admission, and issue access
    before returning content. A revoked or expired grant cannot read Work.
+5. OAuth discovery advertises the disconnect endpoint. A client can revoke its
+   token pair using either token, including after workspace access has ended.
 
 ## Configuration
 
