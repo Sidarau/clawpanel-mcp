@@ -47,6 +47,7 @@ Full OAuth 2.1: DCR, PKCE, authorization codes, refresh, revocation.
 | `CLAWPANEL_OAUTH_PROFILES` | JSON: `{"client@co.com": {"secret": "…", "scopes": ["brain","memory","kb"]}}` |
 | `CLAWPANEL_BASE_URL` | Public URL (for OAuth metadata/redirects) |
 | `CLAWPANEL_CONNECTOR_WORK_READ` | Set to `1` after deploying the Work grant lookup and issue route on clawpanel.app. New registrations can get `work:read`. Add that scope explicitly to any configured profile that should have access. |
+| `CLAWPANEL_OPENAI_APPS_CHALLENGE` | Optional public domain-verification token from the OpenAI publisher dashboard. Set the exact token on the MCP host to serve it as plain text at `/.well-known/openai-apps-challenge`. |
 | `CLAWPANEL_RING` | `alpha` (default) / `beta` / `prod` |
 | `NVIDIA_API_KEY` | Optional — enables vector arm of hybrid KB search and semantic memory search |
 
