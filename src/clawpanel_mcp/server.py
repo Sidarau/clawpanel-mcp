@@ -82,12 +82,12 @@ def build_server(*, base_url: str = "") -> FastMCP:
         async def work_issue_read(
             issue: Annotated[str, Field(
                 min_length=1, max_length=80,
-                description="ClawPanel issue UUID or identifier, such as ZEU-10.",
+                description="Work issue UUID, Work identifier such as ZEU-10, or linear:<source issue UUID> for an imported issue.",
             )],
         ) -> dict[str, Any]:
             """Read one issue in the connected workspace, with recent comments and
             shared Library SOPs linked from its description. Returns source links
-            for the SOPs. Use the issue ID that the user provides or selects."""
+            for the SOPs and the Linear source UUID for imported issues. Use the issue reference that the user provides or selects."""
             token = get_access_token()
             if token is None:
                 raise RuntimeError("Reconnect ClawPanel with Work read access.")

@@ -19,7 +19,7 @@ async def read_work_issue(token: str, issue: str) -> dict[str, Any]:
         if response.status_code == 404:
             raise RuntimeError("That issue is unavailable in the connected workspace.")
         if response.status_code == 400:
-            raise RuntimeError("Use a ClawPanel issue UUID or identifier, such as ZEU-10.")
+            raise RuntimeError("Use a Work issue UUID, a Work identifier, or linear:<source issue UUID>.")
         if response.status_code == 200:
             result = response.json()
             if isinstance(result, dict) and isinstance(result.get("issue"), dict):
