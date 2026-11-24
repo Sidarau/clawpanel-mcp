@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
 
 DEFAULT_BASE_URL = "https://stxavgjhbfjbyperqcsy.supabase.co"
 NOXKEY_SERVICE = "zeuglab/clawpanel/CLAWPANEL_DB_SERVICE_ROLE_JWT"
@@ -124,11 +125,8 @@ class ClawpanelDB:
             headers=self._headers() | {"Content-Type": "application/json",
                                        "Prefer": "resolution=merge-duplicates,return=minimal"},
             method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=30):
-                pass
-        except Exception:
-            pass  # best-effort: memory still serves this run
+        with urllib.request.urlopen(req, timeout=30):
+            pass
 
     def load_client(self, client_id: str) -> dict | None:
         try:
@@ -138,52 +136,47 @@ class ClawpanelDB:
             return None
 
     # -- OAuth token persistence -------------------------------------------
-    # Same failure mode as mcp_clients: access/refresh tokens lived only in
-    # provider memory, and fly's auto-stop ("stop" when idle) wiped them —
-    # every connected ChatGPT session showed "connection has expired" after
-    # the next idle stop. Mirror issued tokens here, rehydrate on a memory
-    # miss, delete on revoke/rotation. Best-effort like save_client: memory
-    # still serves the current run if the DB write fails.
+    # Check the durable row on each use so processes share revocations.
 
-    def save_oauth_token(self, *, access_token: str, refresh_token: str,
-                         client_id: str, scopes: list[str],
-                         expires_at: int | None, principal: dict) -> None:
-        req = urllib.request.Request(
-            f"{self.base}/rest/v1/mcp_oauth_tokens",
-            data=json.dumps({
-                "access_token": access_token, "refresh_token": refresh_token,
-                "client_id": client_id, "scopes": scopes,
-                "expires_at": expires_at, "principal": principal}).encode(),
-            headers=self._headers() | {"Content-Type": "application/json",
-                                       "Prefer": "resolution=merge-duplicates,return=minimal"},
-            method="POST")
+    def save_oauth_token(self, row: dict) -> None:
         try:
-            with urllib.request.urlopen(req, timeout=30):
-                pass
+            self.post("mcp_oauth_tokens", row)
         except Exception:
-            pass  # best-effort: memory still serves this run
+            raise RuntimeError("Could not persist the OAuth connection.") from None
+
+    def rotate_oauth_token(self, old_refresh: str, row: dict) -> bool:
+        scope = urllib.parse.urlencode({
+            "refresh_token": f"eq.{old_refresh}", "client_id": f"eq.{row['client_id']}",
+        })
+        try:
+            return len(self.patch("mcp_oauth_tokens", scope, row)) == 1
+        except Exception:
+            raise RuntimeError("Could not rotate the OAuth connection.") from None
 
     def load_oauth_token_by_access(self, access_token: str) -> dict | None:
-        try:
-            rows = self.get("mcp_oauth_tokens",
-                            f"access_token=eq.{access_token}&limit=1")
-            return rows[0] if rows else None
-        except Exception:
-            return None
+        return self._load_oauth_token("access_token", access_token)
 
     def load_oauth_token_by_refresh(self, refresh_token: str) -> dict | None:
-        try:
-            rows = self.get("mcp_oauth_tokens",
-                            f"refresh_token=eq.{refresh_token}&limit=1")
-            return rows[0] if rows else None
-        except Exception:
-            return None
+        return self._load_oauth_token("refresh_token", refresh_token)
 
-    def delete_oauth_token(self, access_token: str) -> None:
+    def _load_oauth_token(self, key: str, token: str) -> dict | None:
+        scope = urllib.parse.urlencode({key: f"eq.{token}", "limit": "1"})
+        rows = self.get("mcp_oauth_tokens", scope)
+        return rows[0] if rows else None
+
+    def delete_oauth_token(self, token: str, *, refresh: bool = False) -> None:
+        key = "refresh_token" if refresh else "access_token"
         try:
-            self.delete("mcp_oauth_tokens", f"access_token=eq.{access_token}")
+            self.delete("mcp_oauth_tokens", urllib.parse.urlencode({key: f"eq.{token}"}))
         except Exception:
-            pass
+            raise RuntimeError("Could not revoke the OAuth connection.") from None
+
+    def has_workspace_membership(self, user_id: str, tenant_id: str) -> bool:
+        scope = urllib.parse.urlencode({
+            "user_id": f"eq.{UUID(user_id)}", "tenant_id": f"eq.{UUID(tenant_id)}",
+            "select": "id", "limit": "1",
+        })
+        return bool(self.get("workspace_members", scope))
 
     def resolve_profile(self, email: str) -> dict | None:
         """email → {user_id, tenant_id}. The OAuth login gate calls this."""
@@ -200,23 +193,13 @@ class ClawpanelDB:
         profile = self.resolve_profile(email)
         if not profile:
             return []
-        try:
-            rows = self.get("workspace_members",
-                            f"user_id=eq.{profile['user_id']}"
-                            "&select=tenant_id,tenants(slug,name)")
-        except Exception:
-            return [{"tenant_id": str(profile["tenant_id"]), "slug": None,
-                     "name": None}]
-        out = [{"tenant_id": str(r["tenant_id"]),
-                "slug": (r.get("tenants") or {}).get("slug"),
-                "name": (r.get("tenants") or {}).get("name")
-                or (r.get("tenants") or {}).get("slug")}
-               for r in rows
-               if (r.get("tenants") or {}).get("slug")]  # hide slug-less orphans (e.g. signup auto-tenant)
-        if not out:  # no memberships: fall back to the profile tenant
-            out = [{"tenant_id": str(profile["tenant_id"]), "slug": None,
-                    "name": None}]
-        return out
+        rows = self.get("workspace_members",
+                        f"user_id=eq.{UUID(profile['user_id'])}&select=tenant_id,tenants(slug,name)")
+        return [{"tenant_id": str(r["tenant_id"]),
+                 "slug": (r.get("tenants") or {}).get("slug"),
+                 "name": (r.get("tenants") or {}).get("name")
+                 or (r.get("tenants") or {}).get("slug")}
+                for r in rows if (r.get("tenants") or {}).get("slug")]
 
     def verify_password(self, email: str, password: str) -> bool | None:
         """Check email+password against Supabase auth (the website credential).
