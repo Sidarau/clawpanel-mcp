@@ -8,8 +8,8 @@ PKCE, authorization codes, refresh, revocation — plus the ClawPanel twist:
   passphrase + scopes → CLAWPANEL_OAUTH_PROFILES env (alpha; DB table in beta)
 
 The tenant becomes part of the token principal: every tool call resolves the
-bearer token back to (email, tenant_id, scopes) through this provider's
-in-memory principal map. Tools never accept tenant input from the client.
+bearer token back to its durable grant and a current workspace membership.
+Tools never accept tenant input from the client.
 
 Scopes mirror the mcp_tokens vocabulary already in clawpanel_db:
   brain   — agents, workspace status, chat history
@@ -24,10 +24,14 @@ import os
 import secrets
 import time
 import urllib.parse
+from html import escape
 from typing import Any
 
+import anyio
+from pydantic import AnyUrl
+
 from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
-from mcp.server.auth.provider import AccessToken, AuthorizationParams, RefreshToken
+from mcp.server.auth.provider import AccessToken, AuthorizationParams, RefreshToken, TokenError
 from mcp.server.auth.settings import ClientRegistrationOptions
 from mcp.shared.auth import OAuthClientInformationFull
 from starlette.requests import Request
@@ -36,6 +40,7 @@ from starlette.routing import Route
 
 ALL_SCOPES = ["brain", "memory", "kb", "drive", "approvals", "edit", "create"]
 HOST_SCOPES = ["approvals", "edit", "create"]  # workspace-host capabilities
+AUTH_PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 
 LOGIN_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <title>ClawPanel · sign in</title><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -70,116 +75,101 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
         )
         self.db = db
         self.profiles_cfg = {k.strip().lower(): v for k, v in profiles_cfg.items()}
-        # token string -> {"email","tenant_id","user_id","scopes"}
-        self.principals: dict[str, dict] = {}
         self._code_principal: dict[str, dict] = {}
 
     # -- principal plumbing -------------------------------------------------
 
     async def register_client(self, client_info):  # type: ignore[override]
+        await anyio.to_thread.run_sync(self.db.save_client, client_info.model_dump(mode="json"))
         await super().register_client(client_info)
-        # Persist the DCR registration — fly restarts wipe memory, and a lost
-        # registration strands the client at "Unregistered client" forever.
-        self.db.save_client(client_info.model_dump(mode="json"))
 
     async def get_client(self, client_id: str):  # type: ignore[override]
         client = await super().get_client(client_id)
         if client is None:
-            row = self.db.load_client(client_id)
+            row = await anyio.to_thread.run_sync(self.db.load_client, client_id)
             if row:
                 client = OAuthClientInformationFull.model_validate(row)
                 self.clients[client_id] = client
         return client
 
-    # -- token persistence ---------------------------------------------------
-    # Access tokens expire after 1h and refresh tokens are rotated, but both
-    # lived only in memory — and fly auto-stops this machine when idle, so
-    # every idle period ended every ChatGPT session ("connection has
-    # expired"). Persist each issued pair; rehydrate from the DB on a memory
-    # miss; delete on revoke and rotation.
+    def _token_record(self, token, principal: dict) -> dict:
+        access = self.access_tokens[token.access_token]
+        record = {
+            "access_token": token.access_token, "refresh_token": token.refresh_token,
+            "client_id": access.client_id, "scopes": access.scopes,
+            "expires_at": access.expires_at, "principal": principal,
+        }
+        self._revoke_internal(access_token_str=token.access_token)
+        return record
 
-    def _persist_token(self, token, principal: dict) -> None:
-        access = self.access_tokens.get(token.access_token)
-        refresh = self.refresh_tokens.get(token.refresh_token)
-        self.db.save_oauth_token(
-            access_token=token.access_token,
-            refresh_token=token.refresh_token,
-            client_id=access.client_id if access else "",
-            scopes=list(access.scopes) if access else [],
-            expires_at=access.expires_at if access else None,
-            principal=principal)
+    def _admitted(self, row: dict | None) -> bool:
+        principal = row.get("principal") if row else None
+        if not principal:
+            return False
+        try:
+            return self.db.has_workspace_membership(principal["user_id"], principal["tenant_id"])
+        except (KeyError, TypeError, ValueError):
+            return False
 
-    def _rehydrate_token(self, row: dict) -> None:
-        access, refresh = row["access_token"], row["refresh_token"]
-        scopes = row.get("scopes") or []
-        self.access_tokens[access] = AccessToken(
-            token=access, client_id=row["client_id"], scopes=scopes,
-            expires_at=row.get("expires_at"))
-        self.refresh_tokens[refresh] = RefreshToken(
-            token=refresh, client_id=row["client_id"], scopes=scopes,
-            expires_at=None)
-        self._access_to_refresh_map[access] = refresh
-        self._refresh_to_access_map[refresh] = access
-        if row.get("principal"):
-            self.principals[access] = row["principal"]
+    def _active_access(self, token: str) -> dict | None:
+        try:
+            row = self.db.load_oauth_token_by_access(token)
+            if row and row["expires_at"] and row["expires_at"] > time.time() and self._admitted(row):
+                return row
+        except Exception:
+            # A storage outage cannot grant access based on a stale identity.
+            return None
+        return None
+
+    def _active_refresh(self, client_id: str, token: str) -> dict | None:
+        try:
+            row = self.db.load_oauth_token_by_refresh(token)
+            if row and row["client_id"] == client_id and self._admitted(row):
+                return row
+        except Exception:
+            return None
+        return None
 
     async def load_access_token(self, token: str):  # type: ignore[override]
-        obj = await super().load_access_token(token)
-        if obj is not None:
-            return obj
-        row = self.db.load_oauth_token_by_access(token)
-        if not row:
-            return None
-        exp = row.get("expires_at")
-        if exp is not None and exp < time.time():
-            self.db.delete_oauth_token(token)
-            return None
-        self._rehydrate_token(row)
-        return self.access_tokens.get(token)
+        row = await anyio.to_thread.run_sync(self._active_access, token)
+        if row:
+            return AccessToken(token=token, client_id=row["client_id"], scopes=row["scopes"],
+                               expires_at=row["expires_at"])
+        return None
 
     async def load_refresh_token(self, client, refresh_token: str):  # type: ignore[override]
-        obj = await super().load_refresh_token(client, refresh_token)
-        if obj is not None:
-            return obj
-        row = self.db.load_oauth_token_by_refresh(refresh_token)
-        if not row or row["client_id"] != client.client_id:
-            return None
-        self._rehydrate_token(row)
-        return self.refresh_tokens.get(refresh_token)
+        row = await anyio.to_thread.run_sync(self._active_refresh, client.client_id, refresh_token)
+        if row:
+            return RefreshToken(token=refresh_token, client_id=row["client_id"], scopes=row["scopes"])
+        return None
 
     async def revoke_token(self, token) -> None:  # type: ignore[override]
-        await super().revoke_token(token)
-        tok = getattr(token, "token", None)
-        if not tok:
-            return
-        self.db.delete_oauth_token(tok)  # if it was an access token
-        row = self.db.load_oauth_token_by_refresh(tok)  # if it was a refresh
-        if row:
-            self.db.delete_oauth_token(row["access_token"])
+        await anyio.to_thread.run_sync(
+            lambda: self.db.delete_oauth_token(token.token, refresh=isinstance(token, RefreshToken)))
 
     async def exchange_authorization_code(self, client, authorization_code):  # type: ignore[override]
-        token = await super().exchange_authorization_code(client, authorization_code)
         principal = self._code_principal.pop(authorization_code.code, None)
-        if principal:
-            self.principals[token.access_token] = principal
-        self._persist_token(token, principal or {})
+        if not await anyio.to_thread.run_sync(self._admitted, {"principal": principal}):
+            raise TokenError("invalid_grant", "Current workspace access is required.")
+        token = await super().exchange_authorization_code(client, authorization_code)
+        await anyio.to_thread.run_sync(self.db.save_oauth_token, self._token_record(token, principal))
         return token
 
     async def exchange_refresh_token(self, client, refresh_token, scopes):  # type: ignore[override]
-        # carry the principal across the refresh: old access token -> new
-        old_access = self._refresh_to_access_map.get(refresh_token.token)
-        principal = self.principals.get(old_access) if old_access else None
-        token = await super().exchange_refresh_token(client, refresh_token, scopes)
-        if principal:
-            self.principals[token.access_token] = principal
-        # super() rotated the pair in memory; rotate the DB row to match.
-        if old_access:
-            self.db.delete_oauth_token(old_access)
-        self._persist_token(token, principal or {})
+        row = await anyio.to_thread.run_sync(self._active_refresh, client.client_id, refresh_token.token)
+        if not row:
+            raise TokenError("invalid_grant", "The connection expired or was revoked.")
+        current = RefreshToken(token=refresh_token.token, client_id=row["client_id"], scopes=row["scopes"])
+        token = await super().exchange_refresh_token(client, current, scopes)
+        updated = await anyio.to_thread.run_sync(
+            self.db.rotate_oauth_token, refresh_token.token, self._token_record(token, row["principal"]))
+        if not updated:
+            raise TokenError("invalid_grant", "The connection expired or was revoked.")
         return token
 
-    def principal_for(self, token_str: str) -> dict | None:
-        return self.principals.get(token_str)
+    async def principal_for(self, token: str) -> dict | None:
+        row = await anyio.to_thread.run_sync(self._active_access, token)
+        return {**row["principal"], "scopes": row["scopes"]} if row else None
 
     # -- routes ---------------------------------------------------------------
 
@@ -206,11 +196,11 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
         # The env passphrase remains as a legacy fallback (and the only path
         # when Supabase auth is unreachable). Accounts dropped from
         # CLAWPANEL_OAUTH_PROFILES accept ONLY their website password.
-        ok = self.db.verify_password(email, secret)
-        if ok is not True and (not cfg or cfg["secret"] != secret):
+        ok = await anyio.to_thread.run_sync(self.db.verify_password, email, secret)
+        if ok is not True and not (ok is None and cfg and secrets.compare_digest(cfg.get("secret", ""), secret)):
             return self._page(q, error='<span class="err">Unknown email or bad password.</span>')
 
-        profile = self.db.resolve_profile(email)
+        profile = await anyio.to_thread.run_sync(self.db.resolve_profile, email)
         if not profile:
             return self._page(q, error='<span class="err">No ClawPanel workspace '
                                        'for this email.</span>')
@@ -218,7 +208,7 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
         # One email, several workspaces: the connector's tenant comes from a
         # CHOSEN membership (picker page), not profiles.tenant_id. Single-
         # membership accounts skip the picker entirely.
-        memberships = self.db.memberships_for(email)
+        memberships = await anyio.to_thread.run_sync(self.db.memberships_for, email)
         if not memberships:
             return self._page(q, error='<span class="err">No ClawPanel workspace '
                                        'for this email.</span>')
@@ -228,7 +218,7 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
             match = next((m for m in memberships
                           if choice in (m["slug"], m["tenant_id"])), None)
             if match is None:
-                return self._workspace_page(q, memberships, email, secret)
+                return self._workspace_page(q, memberships, email)
             picked = match
         # Env-less accounts (password-only) get the workspace-user scopes.
         default_scopes = ["brain", "memory", "kb"]
@@ -238,17 +228,16 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
             client = await self.get_client(str(q["client_id"]))
             if client is None:
                 return self._page(q, error='<span class="err">Unregistered client.</span>')
-            # The parent filters granted scopes against the client's registered
-            # scopes. The SERVER is the authority on grants: widen the
-            # registration so the profile's scopes always survive the filter.
-            if scopes:
-                client.scope = " ".join(
-                    sorted(set((client.scope or "").split()) | set(scopes)))
+            registered = (client.scope or "kb").split()
+            requested = client.validate_scope(q.get("scope"))
+            grant = [scope for scope in (registered if requested is None else requested) if scope in scopes]
+            if "kb" not in grant or (requested is not None and len(grant) != len(requested)):
+                return self._page(q, error='<span class="err">This account cannot grant the requested scopes.</span>')
             params = AuthorizationParams(
-                redirect_uri=str(q["redirect_uri"]),
+                redirect_uri=client.validate_redirect_uri(AnyUrl(str(q["redirect_uri"]))),
                 redirect_uri_provided_explicitly=True,
                 state=q.get("state") or None,
-                scopes=scopes,  # profile config decides — never the request
+                scopes=grant,
                 code_challenge=str(q["code_challenge"]),
                 resource=q.get("resource") or None,
             )
@@ -260,29 +249,27 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
                     "email": email,
                     "tenant_id": str(picked["tenant_id"]),
                     "user_id": str(profile["user_id"]),
-                    "scopes": scopes}
+                    "scopes": grant}
             return RedirectResponse(redirect_url, status_code=303)
-        except Exception as e:  # noqa: BLE001
-            return self._page(q, error=f'<span class="err">{type(e).__name__}: {e}</span>')
+        except Exception:
+            return self._page(q, error='<span class="err">This authorization request is invalid or expired.</span>')
 
     def _page(self, q: dict[str, Any], error: str) -> HTMLResponse:
         hidden = "".join(
-            f'<input type="hidden" name="{k}" value="{v}">' for k, v in q.items())
+            f'<input type="hidden" name="{escape(k)}" value="{escape(str(v))}">' for k, v in q.items())
         return HTMLResponse(LOGIN_PAGE.format(
-            client=q.get("client_id", "An MCP client"), error=error, hidden=hidden))
+            client=escape(str(q.get("client_id", "An MCP client"))), error=error, hidden=hidden),
+            headers=AUTH_PAGE_HEADERS)
 
     def _workspace_page(self, q: dict[str, Any], memberships: list[dict],
-                        email: str = "", secret: str = "") -> HTMLResponse:
-        """Second step after login when the account belongs to several
-        workspaces: which tenant should THIS connector serve? Credentials ride
-        along as hidden fields and are re-verified on submit — the picker is
-        not a session."""
+                        email: str = "") -> HTMLResponse:
+        """Select the workspace, then confirm the connection with the password."""
         options = "".join(
-            f'<option value="{m["slug"] or m["tenant_id"]}">'
-            f'{m["name"] or m["slug"] or m["tenant_id"]}</option>'
+            f'<option value="{escape(m["slug"] or m["tenant_id"])}">'
+            f'{escape(m["name"] or m["slug"] or m["tenant_id"])}</option>'
             for m in memberships)
         hidden = "".join(
-            f'<input type="hidden" name="{k}" value="{v}">' for k, v in q.items())
+            f'<input type="hidden" name="{escape(k)}" value="{escape(str(v))}">' for k, v in q.items())
         return HTMLResponse(f"""<!doctype html><html><head><meta charset="utf-8">
 <title>ClawPanel · pick a workspace</title><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{{font-family:ui-sans-serif,system-ui;background:#0c1014;color:#e8e6e1;
@@ -299,10 +286,10 @@ cursor:pointer;color:#fff}}</style></head>
 <p>This account belongs to {len(memberships)} workspaces. Which one should
 this connection use?</p>
 {hidden}
-<input type="hidden" name="email" value="{email}">
-<input type="hidden" name="passphrase" value="{secret}">
+<label>Email <input type="email" name="email" value="{escape(email)}" autocomplete="username" required></label>
+<label>Password <input type="password" name="passphrase" autocomplete="current-password" required></label>
 <select name="workspace" required>{options}</select>
-<button type="submit">Connect</button></form></body></html>""")
+<button type="submit">Connect</button></form></body></html>""", headers=AUTH_PAGE_HEADERS)
 
 
 RINGS = ("alpha", "beta", "prod")

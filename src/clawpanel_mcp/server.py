@@ -53,12 +53,12 @@ def _client() -> ClawpanelDB:
     return _db
 
 
-def _principal() -> dict:
+async def _principal() -> dict:
     """Current caller's identity from the bearer token."""
     tok = get_access_token()
     if tok is None or _provider is None:
         raise RuntimeError("no authenticated principal")
-    p = _provider.principal_for(tok.token)
+    p = await _provider.principal_for(tok.token)
     if not p:
         raise RuntimeError("token has no workspace principal — re-authenticate")
     return p
@@ -78,7 +78,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
     async def search(query: str) -> dict[str, Any]:
         """Search your workspace knowledge base. Returns
         {results: [{id, title, url}]} — call fetch(id) for full content."""
-        p = _principal()
+        p = await _principal()
         rows = await anyio.to_thread.run_sync(
             lambda: _client().search_kb(p["tenant_id"], query, k=8))
         return {"results": [
@@ -90,7 +90,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
     @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("kb")])
     async def fetch(id: str) -> dict[str, Any]:
         """Fetch the full content of one search result by id."""
-        p = _principal()
+        p = await _principal()
         row = await anyio.to_thread.run_sync(
             lambda: _client().fetch_chunk(p["tenant_id"], id))
         if not row:
@@ -110,7 +110,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
         title (and the source URL when you have one). Returns
         {ingested: true, chunks: n, id} — re-ingesting the same source
         updates it in place instead of duplicating."""
-        p = _principal()
+        p = await _principal()
         res = await anyio.to_thread.run_sync(
             lambda: _client().ingest_kb(p["tenant_id"], title, text,
                                         source_url, p["user_id"]))
@@ -121,7 +121,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
     @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("memory")])
     async def memory_search(query: str, k: int = 5) -> str:
         """Semantic search over your workspace's memory."""
-        p = _principal()
+        p = await _principal()
         rows = await anyio.to_thread.run_sync(
             lambda: _client().memory_search(p["tenant_id"], query, k))
         if not rows:
@@ -132,7 +132,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
     @mcp.tool(annotations=WRITE_MEMO, auth=[require_scopes("memory")])
     async def remember(text: str) -> str:
         """Add a memory item to your workspace (a note, decision, or fact)."""
-        p = _principal()
+        p = await _principal()
         row = await anyio.to_thread.run_sync(
             lambda: _client().memory_add(p["tenant_id"], p["user_id"], text))
         rid = row.get("id") if isinstance(row, dict) else None
@@ -144,7 +144,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
         documents ingested, and memories added — each with its timestamp and
         who did it (by email). Use this for "what did X add today/yesterday"
         questions; limit caps the entries returned."""
-        p = _principal()
+        p = await _principal()
         rows = await anyio.to_thread.run_sync(
             lambda: _client().activity(p["tenant_id"], min(100, max(1, limit))))
         if not rows:
@@ -161,7 +161,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
     @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("brain")])
     async def agents() -> str:
         """List your workspace's agents (name, model, gateway)."""
-        p = _principal()
+        p = await _principal()
         rows = await anyio.to_thread.run_sync(
             lambda: _client().agents_list(p["tenant_id"]))
         if not rows:
@@ -175,7 +175,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
     async def create_agent(name: str, system_prompt: str,
                            default_model: str | None = None) -> str:
         """Create a new agent in your workspace (host scope: create)."""
-        p = _principal()
+        p = await _principal()
         row = await anyio.to_thread.run_sync(
             lambda: _client().create_agent(p["tenant_id"], name, system_prompt,
                                            default_model))
@@ -188,7 +188,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
                            persona: str | None = None) -> str:
         """Edit an existing agent — name, prompt, model, or persona
         (host scope: edit). Only the fields you pass are changed."""
-        p = _principal()
+        p = await _principal()
         fields = {"name": name, "system_prompt": system_prompt,
                   "default_model": default_model, "persona": persona}
         row = await anyio.to_thread.run_sync(
@@ -199,7 +199,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
     async def workspace_status() -> str:
         """What your workspace is doing: agents, recent workflow runs,
         recent tool activity."""
-        p = _principal()
+        p = await _principal()
         agents_rows, runs, calls = await anyio.to_thread.run_sync(
             lambda: (_client().agents_list(p["tenant_id"]),
                      _client().recent_runs(p["tenant_id"], 10),
@@ -218,7 +218,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
     @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("brain")])
     async def chat_history(limit: int = 20) -> str:
         """Recent chat messages in your workspace."""
-        p = _principal()
+        p = await _principal()
         rows = await anyio.to_thread.run_sync(
             lambda: _client().chat_history(p["tenant_id"], min(limit, 50)))
         if not rows:
@@ -241,7 +241,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
         call studio("list") to see every action with its parameters, then
         studio(action_name, {...}) to run it. Prefer this when the dedicated
         tools don't cover what you need."""
-        p = _principal()
+        p = await _principal()
         if action in ("list", "list_actions", "help"):
             lines = [f"{name} — {meta['description']}"
                      + (f" (params: {meta['params']})" if meta.get("params") else "")
