@@ -320,12 +320,14 @@ version = "0.1.0a1"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
+    { name = "httpx" },
     { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastmcp", specifier = ">=3.4.5" },
+    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]
 

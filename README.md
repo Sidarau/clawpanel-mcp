@@ -11,6 +11,7 @@ and the **alpha ring** of ClawPanel's public API surface.
 
 | Tool | What it does | Scope |
 |---|---|---|
+| `work_issue_read` | Read one visible Work issue, recent comments, and shared Library documents linked from its description | `work:read` |
 | `search` / `fetch` | ChatGPT-compatible pair over the tenant KB — `{results: [{id, title, url}]}`, `fetch(id)` → full text | `kb` |
 | `ingest` | Add a document (extracted text) to the tenant KB; searchable via `search`/`fetch` afterward. Idempotent per source | `kb` |
 | `memory_search` | Semantic search over workspace memory | `memory` |
@@ -29,13 +30,13 @@ Full OAuth 2.1: DCR, PKCE, authorization codes, refresh, revocation.
 
 1. ChatGPT/Claude discovers metadata, registers itself (DCR), opens `/authorize`.
 2. The client signs in with **their ClawPanel email + passphrase**.
-3. The server resolves email → `profiles` row → `tenant_id` and issues a token
-   whose scopes come from server-side profile config — never from the request.
-4. Scopes mirror the `mcp_tokens` vocabulary: `brain`, `memory`, `kb`, `drive`.
-
-Rings: `alpha` (passphrases in env, in-memory sessions) → `beta` (Supabase
-auth sessions, persistent grants) → `prod` (per-profile labels, RLS-enforced
-direct connections). Token contract is frozen from alpha.
+3. If the account belongs to several workspaces, the user chooses one. The
+   server issues a grant for the requested scopes allowed by that account and
+   client registration.
+4. Work reads recheck the grant, membership, app admission, and issue access
+   before returning content. A revoked or expired grant cannot read Work.
+5. OAuth discovery advertises the disconnect endpoint. A client can revoke its
+   token pair using either token, including after workspace access has ended.
 
 ## Configuration
 
@@ -45,6 +46,8 @@ direct connections). Token contract is frozen from alpha.
 | `CLAWPANEL_DB_KEY` | service-role JWT. **Server-only** — it bypasses RLS, so tenant isolation is enforced in code on every query. Auto-resolves from NoxKey `zeuglab/clawpanel/CLAWPANEL_DB_SERVICE_ROLE_JWT` on macOS. |
 | `CLAWPANEL_OAUTH_PROFILES` | JSON: `{"client@co.com": {"secret": "…", "scopes": ["brain","memory","kb"]}}` |
 | `CLAWPANEL_BASE_URL` | Public URL (for OAuth metadata/redirects) |
+| `CLAWPANEL_CONNECTOR_WORK_READ` | Set to `1` after deploying the Work grant lookup and issue route on clawpanel.app. New registrations can get `work:read`. Add that scope explicitly to any configured profile that should have access. |
+| `CLAWPANEL_OPENAI_APPS_CHALLENGE` | Optional public domain-verification token from the OpenAI publisher dashboard. Set the exact token on the MCP host to serve it as plain text at `/.well-known/openai-apps-challenge`. |
 | `CLAWPANEL_RING` | `alpha` (default) / `beta` / `prod` |
 | `NVIDIA_API_KEY` | Optional — enables vector arm of hybrid KB search and semantic memory search |
 

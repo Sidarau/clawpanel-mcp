@@ -164,6 +164,9 @@ class ClawpanelDB:
         rows = self.get("mcp_oauth_tokens", scope)
         return rows[0] if rows else None
 
+    def revoke_oauth_connection(self, client_id: str, token: str) -> None:
+        self.rpc("revoke_connector_oauth_grant", {"p_client_id": client_id, "p_token": token})
+
     def delete_oauth_token(self, token: str, *, refresh: bool = False) -> None:
         key = "refresh_token" if refresh else "access_token"
         try:

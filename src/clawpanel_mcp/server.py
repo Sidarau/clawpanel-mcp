@@ -3,6 +3,7 @@
 Tools (tenant-scoped by the OAuth token — clients only ever see their own
 workspace):
 
+  work_issue_read      read a Work issue and linked Library SOPs (scope: work:read)
   search / fetch       ChatGPT-compatible pair over the tenant KB (scope: kb)
   ingest               add a document to the tenant KB, searchable via search (scope: kb)
   memory_search        semantic search over workspace memory (scope: memory)
@@ -18,15 +19,18 @@ tenant-aware.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Annotated, Any
 
 import anyio
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_access_token
-from fastmcp.tools.tool import ToolAnnotations
+from mcp.types import ToolAnnotations
+from pydantic import Field
+from starlette.responses import PlainTextResponse
 
-from .auth import build_auth
+from .auth import WORK_READ_SCOPE, build_auth
 from .backend import ClawpanelDB
+from .work import read_work_issue
 
 INSTRUCTIONS = """\
 ClawPanel — your OpenClaw workspace as tools. Search your knowledge base
@@ -67,14 +71,41 @@ async def _principal() -> dict:
 def build_server(*, base_url: str = "") -> FastMCP:
     global _provider
     db = _client()
-    _provider = build_auth(base_url, db)
+    work_read = os.environ.get("CLAWPANEL_CONNECTOR_WORK_READ") == "1"
+    _provider = build_auth(base_url, db, work_read=work_read)
     mcp = FastMCP(name="clawpanel-mcp", instructions=INSTRUCTIONS, auth=_provider)
+
+    challenge = os.environ.get("CLAWPANEL_OPENAI_APPS_CHALLENGE", "")
+
+    @mcp.custom_route("/.well-known/openai-apps-challenge", methods=["GET"], include_in_schema=False)
+    async def openai_apps_challenge(_request):
+        headers = {"Cache-Control": "no-store"}
+        if not challenge or not challenge.isascii() or not challenge.isprintable() or any(c.isspace() for c in challenge):
+            return PlainTextResponse("Not found", status_code=404, headers=headers)
+        return PlainTextResponse(challenge, headers=headers)
 
     from fastmcp.server.auth import require_scopes
 
+    if work_read:
+        @mcp.tool(title="Read a ClawPanel Work issue", annotations=READ_ONLY,
+                  auth=[require_scopes(WORK_READ_SCOPE)])
+        async def work_issue_read(
+            issue: Annotated[str, Field(
+                min_length=1, max_length=80,
+                description="Work issue UUID, Work identifier such as ZEU-10, or linear:<source issue UUID> for an imported issue.",
+            )],
+        ) -> dict[str, Any]:
+            """Read one issue in the connected workspace, with recent comments and
+            shared Library SOPs linked from its description. Returns source links
+            for the SOPs and the Linear source UUID for imported issues. Use the issue reference that the user provides or selects."""
+            token = get_access_token()
+            if token is None:
+                raise RuntimeError("Reconnect ClawPanel with Work read access.")
+            return await read_work_issue(token.token, issue)
+
     # -- KB (ChatGPT deep-research compatible pair) --------------------------
 
-    @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("kb")])
+    @mcp.tool(title="Search workspace knowledge", annotations=READ_ONLY, auth=[require_scopes("kb")])
     async def search(query: str) -> dict[str, Any]:
         """Search your workspace knowledge base. Returns
         {results: [{id, title, url}]} — call fetch(id) for full content."""
@@ -87,7 +118,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
              "url": r.get("source_url") or f"clawpanel://chunks/{r.get('chunk_id') or r.get('id')}"}
             for r in rows]}
 
-    @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("kb")])
+    @mcp.tool(title="Read a knowledge search result", annotations=READ_ONLY, auth=[require_scopes("kb")])
     async def fetch(id: str) -> dict[str, Any]:
         """Fetch the full content of one search result by id."""
         p = await _principal()
@@ -102,7 +133,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
                 "url": f"clawpanel://chunks/{row['id']}",
                 "metadata": {"chunk_index": row.get("chunk_index")}}
 
-    @mcp.tool(annotations=WRITE_KB, auth=[require_scopes("kb")])
+    @mcp.tool(title="Save a workspace document", annotations=WRITE_KB, auth=[require_scopes("kb")])
     async def ingest(title: str, text: str,
                      source_url: str | None = None) -> dict[str, Any]:
         """Add a document to your workspace knowledge base so it becomes
@@ -118,7 +149,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
 
     # -- memory -----------------------------------------------------------------
 
-    @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("memory")])
+    @mcp.tool(title="Search workspace memory", annotations=READ_ONLY, auth=[require_scopes("memory")])
     async def memory_search(query: str, k: int = 5) -> str:
         """Semantic search over your workspace's memory."""
         p = await _principal()
@@ -129,7 +160,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
         return "\n\n".join(
             f"- {(r.get('content') or '')[:300]}" for r in rows)
 
-    @mcp.tool(annotations=WRITE_MEMO, auth=[require_scopes("memory")])
+    @mcp.tool(title="Save a workspace memory", annotations=WRITE_MEMO, auth=[require_scopes("memory")])
     async def remember(text: str) -> str:
         """Add a memory item to your workspace (a note, decision, or fact)."""
         p = await _principal()
@@ -138,7 +169,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
         rid = row.get("id") if isinstance(row, dict) else None
         return f"remembered {rid or '(id unknown)'} in your workspace memory"
 
-    @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("memory")])
+    @mcp.tool(title="Read recent workspace activity", annotations=READ_ONLY, auth=[require_scopes("memory")])
     async def activity(limit: int = 40) -> str:
         """The workspace's cross-surface trail, newest first: board changes,
         documents ingested, and memories added — each with its timestamp and
@@ -158,7 +189,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
 
     # -- workspace (brain) --------------------------------------------------------
 
-    @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("brain")])
+    @mcp.tool(title="List workspace agents", annotations=READ_ONLY, auth=[require_scopes("brain")])
     async def agents() -> str:
         """List your workspace's agents (name, model, gateway)."""
         p = await _principal()
@@ -171,7 +202,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
             + (f" · {r['gateway_url']}" if r.get("gateway_url") else "")
             for r in rows)
 
-    @mcp.tool(annotations=WRITE_MEMO, auth=[require_scopes("create")])
+    @mcp.tool(title="Create a workspace agent", annotations=WRITE_MEMO, auth=[require_scopes("create")])
     async def create_agent(name: str, system_prompt: str,
                            default_model: str | None = None) -> str:
         """Create a new agent in your workspace (host scope: create)."""
@@ -181,7 +212,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
                                            default_model))
         return f"created agent {row.get('name')} ({row.get('id')})"
 
-    @mcp.tool(annotations=WRITE_MEMO, auth=[require_scopes("edit")])
+    @mcp.tool(title="Update a workspace agent", annotations=WRITE_MEMO, auth=[require_scopes("edit")])
     async def update_agent(agent_id: str, name: str | None = None,
                            system_prompt: str | None = None,
                            default_model: str | None = None,
@@ -195,7 +226,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
             lambda: _client().update_agent(p["tenant_id"], agent_id, fields))
         return f"updated agent {row.get('name')} ({row.get('id')})"
 
-    @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("brain")])
+    @mcp.tool(title="Read workspace status", annotations=READ_ONLY, auth=[require_scopes("brain")])
     async def workspace_status() -> str:
         """What your workspace is doing: agents, recent workflow runs,
         recent tool activity."""
@@ -215,7 +246,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
         out.append(f"tool calls (last {len(calls)}): {ok} ok, {len(calls) - ok} failed")
         return "\n".join(out)
 
-    @mcp.tool(annotations=READ_ONLY, auth=[require_scopes("brain")])
+    @mcp.tool(title="Read recent workspace chats", annotations=READ_ONLY, auth=[require_scopes("brain")])
     async def chat_history(limit: int = 20) -> str:
         """Recent chat messages in your workspace."""
         p = await _principal()
@@ -234,7 +265,7 @@ def build_server(*, base_url: str = "") -> FastMCP:
     # what's available at runtime via action="list".
     from clawpanel_mcp.orchestrator import ACTIONS, run_action
 
-    @mcp.tool(annotations=WRITE_MEMO, auth=[require_scopes("memory")])
+    @mcp.tool(title="Run a workspace Studio action", annotations=WRITE_MEMO, auth=[require_scopes("memory")])
     async def studio(action: str, params: dict[str, Any] | None = None) -> str:
         """General-purpose workspace action runner — the extensible surface.
         New capabilities appear here WITHOUT reconnecting this connector:
@@ -279,7 +310,6 @@ def main() -> None:
 
     @mcp.custom_route("/healthz", methods=["GET"], include_in_schema=False)
     async def healthz(request):
-        from starlette.responses import PlainTextResponse
         return PlainTextResponse("ok")
 
     uvicorn.run(mcp.http_app(path="/mcp"), host=args.host, port=args.port,
