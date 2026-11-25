@@ -74,15 +74,24 @@ ClawPanel account.{work_notice}</p>
 
 
 class ClawpanelOAuthProvider(InMemoryOAuthProvider):
-    def __init__(self, base_url: str, db, profiles_cfg: dict[str, dict], *, work_read: bool = False):
-        self.valid_scopes = [*ALL_SCOPES, WORK_READ_SCOPE] if work_read else ALL_SCOPES
-        self.default_scopes = ["kb", WORK_READ_SCOPE] if work_read else ["kb"]
+    def __init__(self, base_url: str, db, profiles_cfg: dict[str, dict], *,
+                 work_read: bool = False, member_work_only: bool = False):
+        self.member_work_only = member_work_only
+        self.required_scope = WORK_READ_SCOPE if member_work_only else "kb"
+        if member_work_only:
+            if not work_read:
+                raise ValueError("Member Work connections require Work read support.")
+            self.valid_scopes = [WORK_READ_SCOPE]
+            self.default_scopes = [WORK_READ_SCOPE]
+        else:
+            self.valid_scopes = [*ALL_SCOPES, WORK_READ_SCOPE] if work_read else ALL_SCOPES
+            self.default_scopes = ["kb", WORK_READ_SCOPE] if work_read else ["kb"]
         super().__init__(
             base_url=base_url,
             client_registration_options=ClientRegistrationOptions(
                 enabled=True, valid_scopes=self.valid_scopes, default_scopes=self.default_scopes),
             revocation_options=RevocationOptions(enabled=True),
-            required_scopes=["kb"],
+            required_scopes=[self.required_scope],
         )
         self.db = db
         self.client_authenticator = ClientAuthenticator(self)
@@ -116,7 +125,9 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
 
     def _admitted(self, row: dict | None) -> bool:
         principal = row.get("principal") if row else None
-        if not principal:
+        if not isinstance(principal, dict):
+            return False
+        if self.member_work_only and principal.get("audience") != "member-work":
             return False
         try:
             return self.db.has_workspace_membership(principal["user_id"], principal["tenant_id"])
@@ -126,7 +137,8 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
     def _active_access(self, token: str) -> dict | None:
         try:
             row = self.db.load_oauth_token_by_access(token)
-            if row and row["expires_at"] and row["expires_at"] > time.time() and self._admitted(row):
+            if (row and row["expires_at"] and row["expires_at"] > time.time() and self._admitted(row)
+                    and (not self.member_work_only or row["scopes"] == [WORK_READ_SCOPE])):
                 return row
         except Exception:
             # A storage outage cannot grant access based on a stale identity.
@@ -136,7 +148,8 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
     def _active_refresh(self, client_id: str, token: str) -> dict | None:
         try:
             row = self.db.load_oauth_token_by_refresh(token)
-            if row and row["client_id"] == client_id and self._admitted(row):
+            if (row and row["client_id"] == client_id and self._admitted(row)
+                    and (not self.member_work_only or row["scopes"] == [WORK_READ_SCOPE])):
                 return row
         except Exception:
             return None
@@ -226,7 +239,7 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
              if k not in ("email", "passphrase", "workspace") and isinstance(v, str)}
         email = str(form.get("email", "")).strip().lower()
         secret = str(form.get("passphrase", ""))
-        cfg = self.profiles_cfg.get(email)
+        cfg = None if self.member_work_only else self.profiles_cfg.get(email)
 
         # The website password is the connector password: verify against
         # Supabase auth first so password rotations propagate automatically.
@@ -265,10 +278,10 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
             client = await self.get_client(str(q["client_id"]))
             if client is None:
                 return self._page(q, error='<span class="err">Unregistered client.</span>')
-            registered = (client.scope or "kb").split()
+            registered = (client.scope or self.required_scope).split()
             requested = client.validate_scope(q.get("scope"))
             grant = [scope for scope in (registered if requested is None else requested) if scope in scopes]
-            if "kb" not in grant or (requested is not None and len(grant) != len(requested)):
+            if self.required_scope not in grant or (requested is not None and len(grant) != len(requested)):
                 return self._page(q, error='<span class="err">This account cannot grant the requested scopes.</span>')
             params = AuthorizationParams(
                 redirect_uri=client.validate_redirect_uri(AnyUrl(str(q["redirect_uri"]))),
@@ -282,11 +295,14 @@ class ClawpanelOAuthProvider(InMemoryOAuthProvider):
             code = urllib.parse.parse_qs(
                 urllib.parse.urlparse(redirect_url).query).get("code", [None])[0]
             if code:
-                self._code_principal[code] = {
+                principal = {
                     "email": email,
                     "tenant_id": str(picked["tenant_id"]),
                     "user_id": str(profile["user_id"]),
                     "scopes": grant}
+                if self.member_work_only:
+                    principal["audience"] = "member-work"
+                self._code_principal[code] = principal
             return RedirectResponse(redirect_url, status_code=303)
         except Exception:
             return self._page(q, error='<span class="err">This authorization request is invalid or expired.</span>')
@@ -339,10 +355,12 @@ def build_auth(base_url: str, db, *, work_read: bool = False) -> ClawpanelOAuthP
     ring = (os.environ.get("CLAWPANEL_RING") or "alpha").strip().lower()
     if ring not in RINGS:
         raise RuntimeError(f"CLAWPANEL_RING must be one of {RINGS}")
-    cfg_json = os.environ.get("CLAWPANEL_OAUTH_PROFILES", "")
+    member_work_only = os.environ.get("CLAWPANEL_CONNECTOR_MEMBER_WORK_ONLY") == "1"
+    cfg_json = "{}" if member_work_only else os.environ.get("CLAWPANEL_OAUTH_PROFILES", "")
     if not cfg_json:
         raise RuntimeError(
             "clawpanel-mcp HTTP needs CLAWPANEL_OAUTH_PROFILES — JSON like "
             '{"client@co.com": {"secret": "…", "scopes": ["brain","memory","kb"]}}')
     profiles_cfg = json.loads(cfg_json)
-    return ClawpanelOAuthProvider(base_url=base_url, db=db, profiles_cfg=profiles_cfg, work_read=work_read)
+    return ClawpanelOAuthProvider(base_url=base_url, db=db, profiles_cfg=profiles_cfg,
+                                  work_read=work_read, member_work_only=member_work_only)

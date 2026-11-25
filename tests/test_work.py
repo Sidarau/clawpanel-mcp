@@ -72,3 +72,30 @@ class WorkIssueTests(unittest.IsolatedAsyncioTestCase):
         denied = await provider._authorize_post(Form(**base, scope="kb " + WORK_READ_SCOPE))
         self.assertEqual(denied.status_code, 200)
         self.assertIn(b"cannot grant", denied.body)
+
+    async def test_member_connection_has_work_only_and_tracks_current_membership(self):
+        store = GrantStore()
+        provider = ClawpanelOAuthProvider("https://connector.example", store, {
+            "review@example.test": {"scopes": ["kb", "brain", "create"]},
+        }, work_read=True, member_work_only=True)
+        self.assertEqual(provider.default_scopes, [WORK_READ_SCOPE])
+        self.assertEqual(provider.valid_scopes, [WORK_READ_SCOPE])
+        self.assertIsNone(await provider.load_access_token("fixture-access"))
+        client = OAuthClientInformationFull(
+            client_id="review-client", redirect_uris=[AnyUrl("https://consumer.example/callback")],
+            scope="kb work:read create",
+        )
+        provider.clients[client.client_id] = client
+        request = dict(email="review@example.test", passphrase="fixture-password", client_id="review-client",
+                       code_challenge="fixture-challenge", redirect_uri="https://consumer.example/callback")
+        denied = await provider._authorize_post(Form(**request, scope="work:read create"))
+        self.assertIn(b"cannot grant", denied.body)
+        accepted = await provider._authorize_post(Form(**request, scope=WORK_READ_SCOPE))
+        code = parse_qs(urlparse(accepted.headers["location"]).query)["code"][0]
+        authorization = await provider.load_authorization_code(client, code)
+        credential = await provider.exchange_authorization_code(client, authorization)
+        self.assertEqual((await provider.load_access_token(credential.access_token)).scopes, [WORK_READ_SCOPE])
+        self.assertEqual((await provider.principal_for(credential.access_token))["tenant_id"], "fixture-workspace")
+        store.admitted = False
+        self.assertIsNone(await provider.load_access_token(credential.access_token))
+        self.assertIsNone(await provider.load_refresh_token(client, credential.refresh_token))
